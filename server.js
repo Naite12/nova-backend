@@ -240,24 +240,178 @@ async function sendDailyReports() {
   console.log('🚀 Sending daily reports...');
   const date = new Date().toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' });
   const marketData = await fetchMarketData();
-  
+  const token = process.env.TELEGRAM_TOKEN;
+
   for(const [tier, canal] of Object.entries(CANALS_CONFIG)) {
     try {
+      // Send text report
       const report = await generateDailyReport(tier, marketData, date);
       const msg = buildTieredMessage(tier, date, marketData, report);
-      const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: canal.chatId, text: msg, parse_mode: 'Markdown', disable_web_page_preview: true })
       });
       const d = await r.json();
-      console.log(`${tier}: ${d.ok ? '✅ sent' : '❌ ' + d.description}`);
+      console.log(`${tier} text: ${d.ok ? '✅' : '❌ ' + d.description}`);
+      
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Send charts for Premium and VIP only
+      if(tier === 'premium' || tier === 'vip') {
+        const chartSymbols = ['BTC-USD', 'ETH-USD', 'SPY', 'NVDA'];
+        
+        // Individual bar+line charts
+        for(const sym of chartSymbols.slice(0,2)) {
+          await sendChartToTelegram(token, canal.chatId, sym, `📊 *${sym.replace('-USD','')}* — Analyse 30 jours\n_N.O.V.A. ${tier.toUpperCase()} — Naite Industries_`);
+          await new Promise(r => setTimeout(r, 3000));
+        }
+        
+        // Comparative chart
+        await sendComparativeChart(token, canal.chatId, chartSymbols);
+        await new Promise(r => setTimeout(r, 2000));
+        
+        console.log(`${tier} charts: ✅ sent`);
+      }
+      
     } catch(e) {
       console.log(`${tier}: ❌ error - ${e.message}`);
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3000));
   }
   console.log('✅ Daily reports done!');
+}
+
+
+// ── CHART GENERATION FOR PREMIUM & VIP ──
+async function generateChartBuffer(symbol, type='barline') {
+  const isCrypto = symbol.includes('-USD');
+  const avSym = symbol.replace('-USD','').replace('=X','');
+  
+  try {
+    const url = isCrypto
+      ? `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${avSym}&market=EUR&apikey=ME8M6L7KU4HVB023`
+      : `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${avSym}&outputsize=compact&apikey=ME8M6L7KU4HVB023`;
+    
+    const r = await fetch(url);
+    const d = await r.json();
+    const ts = isCrypto ? d['Time Series (Digital Currency Daily)'] : d['Time Series (Daily)'];
+    if(!ts) return null;
+    
+    const entries = Object.entries(ts).slice(0,30).reverse();
+    const prices = entries.map(([,v]) => parseFloat(isCrypto ? (v['4a. close (EUR)']||v['4. close']) : v['4. close']));
+    const volumes = entries.map(([,v]) => parseFloat(v['5. volume']||0));
+    const labels = entries.map(([k]) => k.slice(5));
+    
+    // Use Chart.js via QuickChart API (no canvas needed on server)
+    const chartConfig = type === 'barline' ? {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { type:'line', label: symbol.replace('-USD',''), data: prices, borderColor:'#00d4ff', backgroundColor:'rgba(0,212,255,0.1)', borderWidth:3, fill:true, tension:0.3, pointRadius:0, yAxisID:'y1' },
+          { type:'bar', label:'Volume', data: volumes, backgroundColor:'rgba(0,100,255,0.3)', borderColor:'rgba(0,150,255,0.5)', borderWidth:1, yAxisID:'y2' }
+        ]
+      },
+      options: {
+        responsive:true,
+        plugins:{ legend:{labels:{color:'#aaa'}}, title:{display:true,text:symbol.replace('-USD','').replace('=X','')+' — 30 Jours',color:'#fff',font:{size:16}} },
+        scales:{
+          y1:{type:'linear',position:'left',ticks:{color:'#aaa'},grid:{color:'rgba(255,255,255,0.05)'}},
+          y2:{type:'linear',position:'right',ticks:{color:'rgba(0,150,255,0.5)'},grid:{display:false}}
+        },
+        backgroundColor:'#0a0e1a'
+      }
+    } : null;
+    
+    const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&width=800&height=400&backgroundColor=%230a0e1a`;
+    const imgR = await fetch(chartUrl);
+    return await imgR.buffer();
+    
+  } catch(e) {
+    console.log('Chart error:', e.message);
+    return null;
+  }
+}
+
+async function sendChartToTelegram(token, chatId, symbol, caption) {
+  const buf = await generateChartBuffer(symbol);
+  if(!buf) return false;
+  
+  const boundary = '----FormBoundary' + Math.random().toString(36);
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n`),
+    buf,
+    Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown\r\n`),
+    Buffer.from(`--${boundary}--`)
+  ]);
+  
+  const r = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body
+  });
+  const result = await r.json();
+  return result.ok;
+}
+
+async function sendComparativeChart(token, chatId, symbols) {
+  try {
+    const datasets = [];
+    for(const sym of symbols.slice(0,4)) {
+      const isCrypto = sym.includes('-USD');
+      const avSym = sym.replace('-USD','').replace('=X','');
+      const url = isCrypto
+        ? `https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=${avSym}&market=EUR&apikey=ME8M6L7KU4HVB023`
+        : `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${avSym}&outputsize=compact&apikey=ME8M6L7KU4HVB023`;
+      const r = await fetch(url);
+      const d = await r.json();
+      const ts = isCrypto ? d['Time Series (Digital Currency Daily)'] : d['Time Series (Daily)'];
+      if(!ts) continue;
+      const entries = Object.entries(ts).slice(0,30).reverse();
+      const prices = entries.map(([,v]) => parseFloat(isCrypto?(v['4a. close (EUR)']||v['4. close']):v['4. close']));
+      const base = prices[0];
+      const labels = entries.map(([k]) => k.slice(5));
+      const colors = ['#00aaff','#ffaa00','#ff5555','#00ff88'];
+      datasets.push({ label: sym.replace('-USD',''), data: prices.map(p=>((p-base)/base*100)), borderColor:colors[datasets.length], backgroundColor:'transparent', borderWidth:2, tension:0.3, pointRadius:0 });
+      if(datasets.length===1) window_labels = labels;
+      await new Promise(r=>setTimeout(r,1500));
+    }
+    
+    if(!datasets.length) return false;
+    
+    const chartConfig = {
+      type:'line',
+      data:{ labels: datasets[0] ? Array.from({length:30},(_,i)=>i+1) : [], datasets },
+      options:{
+        plugins:{ legend:{labels:{color:'#ccc'}}, title:{display:true,text:'Comparative Performance (%) — 30 Days',color:'#fff',font:{size:16}} },
+        scales:{ x:{ticks:{color:'#888'},grid:{color:'rgba(255,255,255,0.04)'}}, y:{ticks:{color:'#888',callback:v=>v.toFixed(0)+'%'},grid:{color:'rgba(255,255,255,0.04)'}} },
+        backgroundColor:'#050810'
+      }
+    };
+    
+    const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&width=800&height=400&backgroundColor=%23050810`;
+    const imgR = await fetch(chartUrl);
+    const buf = await imgR.buffer();
+    
+    const boundary = '----FormBoundary' + Math.random().toString(36);
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="comparison.png"\r\nContent-Type: image/png\r\n\r\n`),
+      buf,
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n📈 *Performance Comparative — 30 Jours*\n_Analyse N.O.V.A. — Naite Industries_\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown\r\n`),
+      Buffer.from(`--${boundary}--`)
+    ]);
+    
+    const sendR = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+      method:'POST', headers:{'Content-Type':`multipart/form-data; boundary=${boundary}`}, body
+    });
+    const result = await sendR.json();
+    return result.ok;
+  } catch(e) { console.log('Comparative chart error:', e.message); return false; }
 }
 
 // Schedule at 7h30 Paris time (UTC+2 = 5h30 UTC)
