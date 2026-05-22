@@ -377,7 +377,8 @@ async function sendChartToTelegram(token, chatId, chartUrl, caption) {
     // Download image from QuickChart
     const imgResponse = await fetch(chartUrl);
     if(!imgResponse.ok) { console.log('QuickChart fetch failed:', imgResponse.status); return false; }
-    const imgBuffer = await imgResponse.buffer();
+    const arrayBuf = await imgResponse.arrayBuffer();
+    const imgBuffer = Buffer.from(arrayBuf);
     
     // Build multipart form manually
     const boundary = 'novaboundary' + Date.now();
