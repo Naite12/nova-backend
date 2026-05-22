@@ -233,10 +233,10 @@ function buildTieredMessage(tier, date, marketData, reportText) {
   const emojis = { free:'🆓', essential:'⚡', premium:'💎', vip:'👑' };
   const sep = '━━━━━━━━━━━━━━━━━';
   const footerMap = {
-    vip: `\n${sep}\n🤖 *ACCÈS APP N.O.V.A. COMPLÈTE*\n👉 nova-vip1.netlify.app`,
-    free: `\n${sep}\n🔒 Analyse complète disponible avec Essential, Premium ou VIP\n👉 nova-industrie.netlify.app`,
-    essential: `\n${sep}\n💎 Signaux illimités et graphiques disponibles avec Premium`,
-    premium: `\n${sep}\n📊 Graphiques d'analyse envoyés séparément`
+    vip: '\n' + sep + '\nACCES APP N.O.V.A. COMPLETE\nnova-vip1.netlify.app',
+    free: '\n' + sep + '\nAnalyse complete disponible avec Essential, Premium ou VIP\nnova-industrie.netlify.app',
+    essential: '\n' + sep + '\nSignaux illimites et graphiques disponibles avec Premium',
+    premium: '\n' + sep + '\nGraphiques analyses envoyes separement'
   };
   const footer = footerMap[tier] || '';
   return `${emojis[tier]} *RAPPORT NOVA ${tier.toUpperCase()}* — ${date}\n_Naite Industries_\n\n${sep}\n📊 *MARCHÉS EN TEMPS RÉEL*\n${mkt}\n\n${sep}\n${reportText}${footer}\n\n${sep}\n_⚠️ Non constitutif d'un conseil en investissement_`;
@@ -383,12 +383,12 @@ async function sendChartToTelegram(token, chatId, chartUrl, caption) {
     return d.ok;
   } catch(e) { console.log('sendChart error:', e.message); return false; }
 }
-
 async function sendComparativeChart(token, chatId, symbols) {
   const url = await getComparativeChartUrl(symbols);
-  const compCaption = 'Performance Comparative 30 Jours - Analyse N.O.V.A. - Naite Industries';
-  return sendChartToTelegram(token, chatId, url, compCaption);
+  const caption = 'Performance Comparative 30 Jours - Analyse N.O.V.A. - Naite Industries';
+  return sendChartToTelegram(token, chatId, url, caption);
 }
+
 
 // Schedule at 7h30 Paris time (UTC+2 = 5h30 UTC)
 function scheduleDaily() {
