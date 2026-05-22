@@ -293,6 +293,7 @@ async function sendDailyReports() {
 
 // ── CHART GENERATION FOR PREMIUM & VIP ──
 async function getChartUrl(symbol) {
+  console.log('Getting chart for:', symbol);
   const isCrypto = symbol.includes('-USD');
   const avSym = symbol.replace('-USD','').replace('=X','');
   try {
@@ -403,6 +404,7 @@ async function sendChartToTelegram(token, chatId, chartUrl, caption) {
     
     const body = Buffer.concat([partChat, partCaption, partPhotoHeader, imgBuffer, partClose]);
     
+    console.log('Sending photo to chat:', chatId, 'buffer size:', imgBuffer.length);
     const r = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
       method: 'POST',
       headers: {
@@ -412,10 +414,10 @@ async function sendChartToTelegram(token, chatId, chartUrl, caption) {
       body
     });
     const d = await r.json();
-    if(!d.ok) console.log('sendPhoto error:', d.description);
+    console.log('sendPhoto result:', JSON.stringify(d).slice(0,200));
     return d.ok;
   } catch(e) { 
-    console.log('sendChart error:', e.message); 
+    console.log('sendChart error:', e.message, e.stack); 
     return false; 
   }
 }
