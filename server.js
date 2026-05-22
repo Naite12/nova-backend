@@ -234,12 +234,23 @@ async function sendPhotoToTelegram(token, chatId, chartConfig, caption) {
       imgBuf = Buffer.from(arrayBuf);
     } else {
       // Use POST API for individual charts
+      const postBody = {
+        backgroundColor: '#0a0d1a',
+        width: 900,
+        height: 450,
+        format: 'png',
+        chart: JSON.stringify(chartConfig)
+      };
       const postRes = await fetch('https://quickchart.io/chart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ backgroundColor: '#0a0d1a', width: 900, height: 450, chart: chartConfig })
+        body: JSON.stringify(postBody)
       });
-      if (!postRes.ok) { console.log('QuickChart POST error:', postRes.status); return false; }
+      if (!postRes.ok) { 
+        const errText = await postRes.text();
+        console.log('QuickChart POST error:', postRes.status, errText.slice(0,100)); 
+        return false; 
+      }
       const arrayBuf = await postRes.arrayBuffer();
       imgBuf = Buffer.from(arrayBuf);
     }
