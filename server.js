@@ -261,7 +261,7 @@ function buildTieredMessage(tier, date, marketData, reportText) {
     premium: '\n' + sep + '\nGraphiques analyses envoyes separement',
     vip: '\n' + sep + '\nACCES APP N.O.V.A. COMPLETE: nova-vip1.netlify.app'
   };
-  return 'RAPPORT N.O.V.A. ' + emojis[tier] + ' - ' + date + '\nNaite Industries\n\n' + sep + '\nMARCHES EN TEMPS REEL\n' + mkt + '\n\n' + sep + '\n' + reportText + (footers[tier] || '') + '\n\n---\nNon constitutif d'un conseil en investissement';
+  return 'RAPPORT N.O.V.A. ' + emojis[tier] + ' - ' + date + '\nNaite Industries\n\n' + sep + '\nMARCHES EN TEMPS REEL\n' + mkt + '\n\n' + sep + '\n' + reportText + (footers[tier] || '') + '\n\n---\nNon constitutif dun conseil en investissement';
 }
 
 async function sendDailyReports() {
