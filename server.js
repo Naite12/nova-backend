@@ -233,10 +233,10 @@ function buildTieredMessage(tier, date, marketData, reportText) {
   const emojis = { free:'🆓', essential:'⚡', premium:'💎', vip:'👑' };
   const sep = '━━━━━━━━━━━━━━━━━';
   const footerMap = {
-    vip: '\n' + sep + '\nACCES APP N.O.V.A. COMPLETE\nnova-vip1.netlify.app',
-    free: '\n' + sep + '\nAnalyse complete disponible avec Essential, Premium ou VIP\nnova-industrie.netlify.app',
-    essential: '\n' + sep + '\nSignaux illimites et graphiques disponibles avec Premium',
-    premium: '\n' + sep + '\nGraphiques analyses envoyes separement'
+    vip: `\n${sep}\n🤖 *ACCÈS APP N.O.V.A. COMPLÈTE*\n👉 nova-vip1.netlify.app`,
+    free: `\n${sep}\n🔒 Analyse complète disponible avec Essential, Premium ou VIP\n👉 nova-industrie.netlify.app`,
+    essential: `\n${sep}\n💎 Signaux illimités et graphiques disponibles avec Premium`,
+    premium: `\n${sep}\n📊 Graphiques d'analyse envoyés séparément`
   };
   const footer = footerMap[tier] || '';
   return `${emojis[tier]} *RAPPORT NOVA ${tier.toUpperCase()}* — ${date}\n_Naite Industries_\n\n${sep}\n📊 *MARCHÉS EN TEMPS RÉEL*\n${mkt}\n\n${sep}\n${reportText}${footer}\n\n${sep}\n_⚠️ Non constitutif d'un conseil en investissement_`;
@@ -374,21 +374,56 @@ async function getComparativeChartUrl(symbols) {
 async function sendChartToTelegram(token, chatId, chartUrl, caption) {
   if(!chartUrl) return false;
   try {
+    // Download image from QuickChart
+    const imgResponse = await fetch(chartUrl);
+    if(!imgResponse.ok) { console.log('QuickChart fetch failed:', imgResponse.status); return false; }
+    const imgBuffer = await imgResponse.buffer();
+    
+    // Build multipart form manually
+    const boundary = 'novaboundary' + Date.now();
+    const CRLF = '\r\n';
+    
+    const partChat = Buffer.from(
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="chat_id"' + CRLF + CRLF +
+      chatId + CRLF
+    );
+    const partCaption = Buffer.from(
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="caption"' + CRLF + CRLF +
+      caption + CRLF
+    );
+    const partPhotoHeader = Buffer.from(
+      '--' + boundary + CRLF +
+      'Content-Disposition: form-data; name="photo"; filename="chart.png"' + CRLF +
+      'Content-Type: image/png' + CRLF + CRLF
+    );
+    const partClose = Buffer.from(CRLF + '--' + boundary + '--' + CRLF);
+    
+    const body = Buffer.concat([partChat, partCaption, partPhotoHeader, imgBuffer, partClose]);
+    
     const r = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({chat_id:chatId, photo:chartUrl, caption, parse_mode:'Markdown'})
+      method: 'POST',
+      headers: {
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
+        'Content-Length': body.length
+      },
+      body
     });
     const d = await r.json();
+    if(!d.ok) console.log('sendPhoto error:', d.description);
     return d.ok;
-  } catch(e) { console.log('sendChart error:', e.message); return false; }
-}
-async function sendComparativeChart(token, chatId, symbols) {
-  const url = await getComparativeChartUrl(symbols);
-  const caption = 'Performance Comparative 30 Jours - Analyse N.O.V.A. - Naite Industries';
-  return sendChartToTelegram(token, chatId, url, caption);
+  } catch(e) { 
+    console.log('sendChart error:', e.message); 
+    return false; 
+  }
 }
 
+async function sendComparativeChart(token, chatId, symbols) {
+  const url = await getComparativeChartUrl(symbols);
+  const compCaption = 'Performance Comparative 30 Jours - Analyse N.O.V.A. - Naite Industries';
+  return sendChartToTelegram(token, chatId, url, compCaption);
+}
 
 // Schedule at 7h30 Paris time (UTC+2 = 5h30 UTC)
 function scheduleDaily() {
