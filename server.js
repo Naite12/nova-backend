@@ -134,71 +134,29 @@ function buildBarLineChartUrl(data, title) {
   const fillColor = isUp ? 'rgba(0,229,255,0.12)' : 'rgba(255,77,109,0.10)';
   const barColor = isUp ? 'rgba(0,150,255,0.35)' : 'rgba(255,100,100,0.25)';
   const change = ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(2);
+  // Use only last 20 points and round prices to reduce URL length
+  const labels = data.labels.slice(-20);
+  const roundedPrices = prices.slice(-20).map(p => Math.round(p));
+  const roundedVols = data.volumes.slice(-20).map(v => Math.round(v/1000));
   const cfg = {
     type: 'bar',
     data: {
-      labels: data.labels,
+      labels,
       datasets: [
-        {
-          type: 'line',
-          label: title + ' (' + (isUp ? '+' : '') + change + '%)',
-          data: prices,
-          borderColor: lineColor,
-          backgroundColor: fillColor,
-          borderWidth: 2.5,
-          fill: true,
-          tension: 0.4,
-          pointRadius: 0,
-          pointHoverRadius: 5,
-          pointHoverBackgroundColor: lineColor,
-          yAxisID: 'y1',
-          order: 1
-        },
-        {
-          type: 'bar',
-          label: 'Volume',
-          data: data.volumes,
-          backgroundColor: barColor,
-          borderColor: 'rgba(0,180,255,0.4)',
-          borderWidth: 1,
-          borderRadius: 2,
-          yAxisID: 'y2',
-          order: 2
-        }
+        { type:'line', label: title+'('+(isUp?'+':'')+change+'%)', data: roundedPrices, borderColor: lineColor, backgroundColor: fillColor, borderWidth:2.5, fill:true, tension:0.4, pointRadius:0, yAxisID:'y1', order:1 },
+        { type:'bar', label:'Vol(K)', data: roundedVols, backgroundColor: barColor, borderWidth:0, yAxisID:'y2', order:2 }
       ]
     },
     options: {
-      animation: false,
+      animation:false,
       plugins: {
-        legend: {
-          display: true,
-          labels: { color: '#a0c4d8', font: { size: 11, weight: 'bold' }, boxWidth: 14, padding: 16 }
-        },
-        title: {
-          display: true,
-          text: title + '  |  N.O.V.A. — Naite Industries',
-          color: '#e0f0ff',
-          font: { size: 14, weight: 'bold' },
-          padding: { bottom: 16 }
-        }
+        legend:{ labels:{ color:'#a0c4d8', font:{size:11} } },
+        title:{ display:true, text: title+' | N.O.V.A.', color:'#e0f0ff', font:{size:13,weight:'bold'} }
       },
       scales: {
-        x: {
-          ticks: { color: '#4a6a7a', font: { size: 8 }, maxTicksLimit: 10 },
-          grid: { color: 'rgba(0,180,255,0.06)', lineWidth: 1 }
-        },
-        y1: {
-          type: 'linear',
-          position: 'left',
-          ticks: { color: '#6a9ab0', font: { size: 9 }, callback: function(v) { return '$' + v.toLocaleString(); } },
-          grid: { color: 'rgba(0,180,255,0.08)', lineWidth: 1 }
-        },
-        y2: {
-          type: 'linear',
-          position: 'right',
-          ticks: { color: 'rgba(0,150,255,0.4)', font: { size: 8 } },
-          grid: { display: false }
-        }
+        x:{ ticks:{color:'#4a6a7a',font:{size:8},maxTicksLimit:8}, grid:{color:'rgba(0,180,255,0.06)'} },
+        y1:{ position:'left', ticks:{color:'#6a9ab0',font:{size:9}}, grid:{color:'rgba(0,180,255,0.08)'} },
+        y2:{ position:'right', ticks:{color:'rgba(0,150,255,0.4)',font:{size:8}}, grid:{display:false} }
       }
     }
   };
