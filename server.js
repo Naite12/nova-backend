@@ -106,89 +106,159 @@ app.get('/api/finance', async (req, res) => {
 
 // ── CHART GENERATION ──
 async function fetchHistoricalData(symbol) {
-  const isCrypto = symbol.includes('-USD');
-  const avSym = symbol.replace('-USD', '').replace('=X', '');
-  const AV_KEY = 'ME8M6L7KU4HVB023';
   try {
-    const url = isCrypto
-      ? 'https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_DAILY&symbol=' + avSym + '&market=EUR&apikey=' + AV_KEY
-      : 'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=' + avSym + '&outputsize=compact&apikey=' + AV_KEY;
-    const r = await fetch(url);
+    // Use Yahoo Finance for historical data - no limits
+    const yahooSym = symbol.includes('-USD') ? symbol.replace('-USD', '-EUR') : symbol;
+    const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=1mo';
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const d = await r.json();
-    // Support both English and French API responses
-    const ts = d['Time Series (Digital Currency Daily)'] 
-      || d['Time Series (Digital Currency Daily) ']
-      || d['Serie chronologique (monnaie numerique quotidienne)']
-      || Object.values(d).find(v => typeof v === 'object' && !v['1. Information'] && !v['Information'])
-      || null;
-    if (!ts) { console.log('No timeseries found, keys:', Object.keys(d)); return null; }
-    const entries = Object.entries(ts).slice(0, 30).reverse();
-    // Support both English and French field names
-    const getClose = (v) => parseFloat(
-      v['4a. close (EUR)'] || v['4. close'] || v['4. fermer'] || v['4a. fermer (EUR)'] || 0
-    );
-    const getVolume = (v) => parseFloat(v['5. volume'] || v['5. Volume'] || 0);
+    const result = d?.chart?.result?.[0];
+    if (!result) { console.log('No Yahoo data for', symbol); return null; }
+    const timestamps = result.timestamp || [];
+    const closes = result.indicators?.quote?.[0]?.close || [];
+    const volumes = result.indicators?.quote?.[0]?.volume || [];
+    if (!closes.length) { console.log('No price data for', symbol); return null; }
+    const labels = timestamps.map(t => new Date(t * 1000).toISOString().slice(5, 10));
     return {
-      labels: entries.map(([k]) => k.slice(5)),
-      prices: entries.map(([, v]) => getClose(v)),
-      volumes: entries.map(([, v]) => getVolume(v))
+      labels: labels.slice(-30),
+      prices: closes.slice(-30).map(p => parseFloat((p || 0).toFixed(2))),
+      volumes: volumes.slice(-30).map(v => parseFloat(v || 0))
     };
   } catch (e) { console.log('fetchHistorical error:', e.message); return null; }
 }
 
 function buildBarLineChartUrl(data, title) {
+  const prices = data.prices;
+  const isUp = prices[prices.length-1] >= prices[0];
+  const lineColor = isUp ? '#00e5ff' : '#ff4d6d';
+  const fillColor = isUp ? 'rgba(0,229,255,0.12)' : 'rgba(255,77,109,0.10)';
+  const barColor = isUp ? 'rgba(0,150,255,0.35)' : 'rgba(255,100,100,0.25)';
+  const change = ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(2);
   const cfg = {
     type: 'bar',
     data: {
       labels: data.labels,
       datasets: [
-        { type: 'line', label: title, data: data.prices, borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.08)', borderWidth: 3, fill: true, tension: 0.3, pointRadius: 0, yAxisID: 'y1' },
-        { type: 'bar', label: 'Volume', data: data.volumes, backgroundColor: 'rgba(0,100,255,0.25)', borderWidth: 0, yAxisID: 'y2' }
+        {
+          type: 'line',
+          label: title + ' (' + (isUp ? '+' : '') + change + '%)',
+          data: prices,
+          borderColor: lineColor,
+          backgroundColor: fillColor,
+          borderWidth: 2.5,
+          fill: true,
+          tension: 0.4,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          pointHoverBackgroundColor: lineColor,
+          yAxisID: 'y1',
+          order: 1
+        },
+        {
+          type: 'bar',
+          label: 'Volume',
+          data: data.volumes,
+          backgroundColor: barColor,
+          borderColor: 'rgba(0,180,255,0.4)',
+          borderWidth: 1,
+          borderRadius: 2,
+          yAxisID: 'y2',
+          order: 2
+        }
       ]
     },
     options: {
+      animation: false,
       plugins: {
-        legend: { labels: { color: '#aaaaaa', font: { size: 11 } } },
-        title: { display: true, text: title + ' - 30 Jours | N.O.V.A.', color: '#ffffff', font: { size: 15, weight: 'bold' } }
+        legend: {
+          display: true,
+          labels: { color: '#a0c4d8', font: { size: 11, weight: 'bold' }, boxWidth: 14, padding: 16 }
+        },
+        title: {
+          display: true,
+          text: title + '  |  N.O.V.A. — Naite Industries',
+          color: '#e0f0ff',
+          font: { size: 14, weight: 'bold' },
+          padding: { bottom: 16 }
+        }
       },
       scales: {
-        y1: { type: 'linear', position: 'left', ticks: { color: '#aaa', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
-        y2: { type: 'linear', position: 'right', ticks: { color: 'rgba(0,150,255,0.4)', font: { size: 9 } }, grid: { display: false } }
+        x: {
+          ticks: { color: '#4a6a7a', font: { size: 8 }, maxTicksLimit: 10 },
+          grid: { color: 'rgba(0,180,255,0.06)', lineWidth: 1 }
+        },
+        y1: {
+          type: 'linear',
+          position: 'left',
+          ticks: { color: '#6a9ab0', font: { size: 9 }, callback: function(v) { return '$' + v.toLocaleString(); } },
+          grid: { color: 'rgba(0,180,255,0.08)', lineWidth: 1 }
+        },
+        y2: {
+          type: 'linear',
+          position: 'right',
+          ticks: { color: 'rgba(0,150,255,0.4)', font: { size: 8 } },
+          grid: { display: false }
+        }
       }
     }
   };
-  return 'https://quickchart.io/chart?backgroundColor=%230a0e1a&width=800&height=400&c=' + encodeURIComponent(JSON.stringify(cfg));
+  return 'https://quickchart.io/chart?backgroundColor=%230a0d1a&width=900&height=450&c=' + encodeURIComponent(JSON.stringify(cfg));
 }
 
 function buildComparativeChartUrl(datasets) {
-  const colors = ['#00aaff', '#ffaa00', '#ff5555', '#00ff88'];
+  const colors = ['#00e5ff', '#ffd60a', '#ff4d6d', '#00ff88'];
+  const bgColors = ['rgba(0,229,255,0.08)', 'rgba(255,214,10,0.06)', 'rgba(255,77,109,0.06)', 'rgba(0,255,136,0.06)'];
   const cfg = {
     type: 'line',
     data: {
       labels: Array.from({ length: 30 }, (_, i) => 'J' + (i + 1)),
-      datasets: datasets.map((ds, i) => ({
-        label: ds.label,
-        data: ds.data,
-        borderColor: colors[i],
-        backgroundColor: 'transparent',
-        borderWidth: 2.5,
-        tension: 0.3,
-        pointRadius: 0,
-        fill: false
-      }))
+      datasets: datasets.map((ds, i) => {
+        const lastVal = ds.data[ds.data.length - 1];
+        return {
+          label: ds.label + ' (' + (lastVal >= 0 ? '+' : '') + lastVal.toFixed(1) + '%)',
+          data: ds.data,
+          borderColor: colors[i % colors.length],
+          backgroundColor: bgColors[i % bgColors.length],
+          borderWidth: 2.5,
+          tension: 0.4,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          fill: false
+        };
+      })
     },
     options: {
+      animation: false,
       plugins: {
-        legend: { labels: { color: '#cccccc', font: { size: 11 } } },
-        title: { display: true, text: 'Performance Comparative (%) - 30 Jours | N.O.V.A.', color: '#ffffff', font: { size: 15, weight: 'bold' } }
+        legend: {
+          display: true,
+          labels: { color: '#a0c4d8', font: { size: 11, weight: 'bold' }, boxWidth: 14, padding: 14 }
+        },
+        title: {
+          display: true,
+          text: 'Performance Comparative (%)  |  N.O.V.A. — Naite Industries',
+          color: '#e0f0ff',
+          font: { size: 14, weight: 'bold' },
+          padding: { bottom: 16 }
+        }
       },
       scales: {
-        x: { ticks: { color: '#666', font: { size: 9 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
-        y: { ticks: { color: '#888', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.05)' } }
+        x: {
+          ticks: { color: '#4a6a7a', font: { size: 8 }, maxTicksLimit: 10 },
+          grid: { color: 'rgba(0,180,255,0.06)' }
+        },
+        y: {
+          ticks: {
+            color: '#6a9ab0',
+            font: { size: 9 },
+            callback: function(v) { return v + '%'; }
+          },
+          grid: { color: 'rgba(0,180,255,0.08)' }
+        }
       }
     }
   };
-  return 'https://quickchart.io/chart?backgroundColor=%23050810&width=800&height=400&c=' + encodeURIComponent(JSON.stringify(cfg));
+  return 'https://quickchart.io/chart?backgroundColor=%23050810&width=900&height=450&c=' + encodeURIComponent(JSON.stringify(cfg));
 }
 
 async function sendPhotoToTelegram(token, chatId, chartUrl, caption) {
