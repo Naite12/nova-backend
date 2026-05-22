@@ -1,5 +1,5 @@
 const express = require('express');
-const stripe = require('stripe')('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');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const cors = require('cors');
 const crypto = require('crypto');
 
@@ -25,10 +25,10 @@ function hashPassword(password) {
 // Send Telegram welcome message
 async function sendTelegramWelcome(plan, email) {
   const tokens = {
-    'free': { token: '8817894057:AAFuTPqWPk66h3gLhI7k3p88g9eTsQYTNvw', chat: '-1003981091130' },
-    'essential': { token: '8817894057:AAFuTPqWPk66h3gLhI7k3p88g9eTsQYTNvw', chat: '-1003981091130' },
-    'premium': { token: '8817894057:AAFuTPqWPk66h3gLhI7k3p88g9eTsQYTNvw', chat: '-1003981091130' },
-    'vip': { token: '8817894057:AAFuTPqWPk66h3gLhI7k3p88g9eTsQYTNvw', chat: '-1003981091130' }
+    'free': { token: process.env.TELEGRAM_TOKEN, chat: '-1003981091130' },
+    'essential': { token: process.env.TELEGRAM_TOKEN, chat: '-1003981091130' },
+    'premium': { token: process.env.TELEGRAM_TOKEN, chat: '-1003981091130' },
+    'vip': { token: process.env.TELEGRAM_TOKEN, chat: '-1003981091130' }
   };
   const cfg = tokens[plan.toLowerCase()] || tokens['free'];
   const msg = `🎉 *Nouveau membre ${plan.toUpperCase()}* !\n\n📧 ${email}\n⚡ Plan: *${plan}*\n📅 ${new Date().toLocaleDateString('fr-FR')}\n\n_Bienvenue sur N.O.V.A. — Naite Industries_`;
@@ -150,7 +150,7 @@ app.post('/api/chat', async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_KEY || '',
+        'x-api-key': process.env.ANTHROPIC_KEY,
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
