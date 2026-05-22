@@ -115,13 +115,23 @@ async function fetchHistoricalData(symbol) {
       : 'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=' + avSym + '&outputsize=compact&apikey=' + AV_KEY;
     const r = await fetch(url);
     const d = await r.json();
-    const ts = isCrypto ? d['Time Series (Digital Currency Daily)'] : d['Time Series (Daily)'];
-    if (!ts) return null;
+    // Support both English and French API responses
+    const ts = d['Time Series (Digital Currency Daily)'] 
+      || d['Time Series (Digital Currency Daily) ']
+      || d['Serie chronologique (monnaie numerique quotidienne)']
+      || Object.values(d).find(v => typeof v === 'object' && !v['1. Information'] && !v['Information'])
+      || null;
+    if (!ts) { console.log('No timeseries found, keys:', Object.keys(d)); return null; }
     const entries = Object.entries(ts).slice(0, 30).reverse();
+    // Support both English and French field names
+    const getClose = (v) => parseFloat(
+      v['4a. close (EUR)'] || v['4. close'] || v['4. fermer'] || v['4a. fermer (EUR)'] || 0
+    );
+    const getVolume = (v) => parseFloat(v['5. volume'] || v['5. Volume'] || 0);
     return {
       labels: entries.map(([k]) => k.slice(5)),
-      prices: entries.map(([, v]) => parseFloat(isCrypto ? (v['4a. close (EUR)'] || v['4. close']) : v['4. close'])),
-      volumes: entries.map(([, v]) => parseFloat(v['5. volume'] || 0))
+      prices: entries.map(([, v]) => getClose(v)),
+      volumes: entries.map(([, v]) => getVolume(v))
     };
   } catch (e) { console.log('fetchHistorical error:', e.message); return null; }
 }
