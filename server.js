@@ -185,6 +185,105 @@ app.get('/api/finance', async (req, res) => {
   }
 });
 
+
+// ── DAILY REPORT SCHEDULER (7h30 Paris time) ──
+const CANALS_CONFIG = {
+  free:      { chatId: '-1003981091130',  tier: 'free' },
+  essential: { chatId: '-1003905947217', tier: 'essential' },
+  premium:   { chatId: '-1003989883363',  tier: 'premium' },
+  vip:       { chatId: '-1003895905201',  tier: 'vip' }
+};
+
+async function fetchMarketData() {
+  const symbols = ['BTC-USD','ETH-USD','SOL-USD','SPY','QQQ','NVDA','AAPL','TSLA'];
+  const data = {};
+  for(const sym of symbols) {
+    try {
+      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1d`);
+      const d = await r.json();
+      const meta = d?.chart?.result?.[0]?.meta;
+      if(meta) {
+        const price = meta.regularMarketPrice;
+        const prev = meta.chartPreviousClose || meta.previousClose;
+        const change = prev ? ((price - prev) / prev * 100).toFixed(2) : 0;
+        data[sym] = { price, change: parseFloat(change), name: meta.longName || sym };
+      }
+    } catch(e) {}
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return data;
+}
+
+async function generateDailyReport(tier, marketData, date) {
+  const mktStr = Object.entries(marketData).map(([s,d]) => `${s}: $${d.price?.toFixed(2)} (${d.change>=0?'+':''}${d.change}%)`).join(', ');
+  const tierStyle = { free: 'très court, résumé uniquement, 80 mots max', essential: 'standard, 150 mots', premium: 'complet et détaillé, 250 mots', vip: 'premium exclusif avec recommandation personnalisée, 300 mots' };
+  const prompt = `Génère un rapport quotidien ${tierStyle[tier]} pour abonnés ${tier.toUpperCase()}. DATE: ${date}. MARCHÉS: ${mktStr}. Sections: BILAN DES MARCHÉS, SIGNAUX DU JOUR (ACHETER/VENDRE/CONSERVER), RECOMMANDATION N.O.V.A. Texte brut sans astérisques.`;
+  
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1000, messages: [{ role: 'user', content: prompt }] })
+  });
+  const d = await r.json();
+  return d.content?.[0]?.text || 'Rapport indisponible.';
+}
+
+function buildTieredMessage(tier, date, marketData, reportText) {
+  const mkt = Object.entries(marketData).slice(0,5).map(([s,d]) => `${d.change>=0?'📈':'📉'} *${s.replace('-USD','').replace('=X','')}*: $${d.price?.toFixed(2)} (${d.change>=0?'+':''}${d.change}%)`).join('\n');
+  const emojis = { free:'🆓', essential:'⚡', premium:'💎', vip:'👑' };
+  const sep = '━━━━━━━━━━━━━━━━━';
+  const footer = tier === 'vip' ? `\n${sep}\n🤖 *ACCÈS APP N.O.V.A.*\n👉 nova-vip1.netlify.app` : tier === 'free' ? `\n${sep}\n🔒 Analyse complète avec Essential/Premium/VIP\n👉 nova-industrie.netlify.app` : '';
+  return `${emojis[tier]} *RAPPORT NOVA ${tier.toUpperCase()}* — ${date}\n_Naite Industries_\n\n${sep}\n📊 *MARCHÉS EN TEMPS RÉEL*\n${mkt}\n\n${sep}\n${reportText}${footer}\n\n${sep}\n_⚠️ Non constitutif d'un conseil en investissement_`;
+}
+
+async function sendDailyReports() {
+  console.log('🚀 Sending daily reports...');
+  const date = new Date().toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' });
+  const marketData = await fetchMarketData();
+  
+  for(const [tier, canal] of Object.entries(CANALS_CONFIG)) {
+    try {
+      const report = await generateDailyReport(tier, marketData, date);
+      const msg = buildTieredMessage(tier, date, marketData, report);
+      const r = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: canal.chatId, text: msg, parse_mode: 'Markdown', disable_web_page_preview: true })
+      });
+      const d = await r.json();
+      console.log(`${tier}: ${d.ok ? '✅ sent' : '❌ ' + d.description}`);
+    } catch(e) {
+      console.log(`${tier}: ❌ error - ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  console.log('✅ Daily reports done!');
+}
+
+// Schedule at 7h30 Paris time (UTC+2 = 5h30 UTC)
+function scheduleDaily() {
+  function checkTime() {
+    const now = new Date();
+    const paris = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Paris' }));
+    if(paris.getHours() === 7 && paris.getMinutes() === 30) {
+      sendDailyReports();
+    }
+  }
+  setInterval(checkTime, 60000); // Check every minute
+  console.log('📅 Daily report scheduler started (7h30 Paris time)');
+}
+
+scheduleDaily();
+
+// Manual trigger endpoint
+app.post('/send-reports', async (req, res) => {
+  const { secret } = req.body;
+  if(secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+  sendDailyReports();
+  res.json({ ok: true, message: 'Reports sending started...' });
+});
+
+
 app.get('/', (req, res) => res.json({ status: 'N.O.V.A. Backend Online', version: '2.0' }));
 
 const PORT = process.env.PORT || 3001;
