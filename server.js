@@ -270,7 +270,8 @@ async function sendDailyReports() {
         // Individual bar+line charts
         for(const sym of chartSymbols.slice(0,2)) {
           const chartUrl = await getChartUrl(sym);
-          await sendChartToTelegram(token, canal.chatId, chartUrl, `📊 *${sym.replace('-USD','')}* — Analyse 30 jours\n_N.O.V.A. ${tier.toUpperCase()} — Naite Industries_`);
+          const cap = sym.replace('-USD','') + ' - Analyse 30 jours - N.O.V.A. ' + tier.toUpperCase();
+          await sendChartToTelegram(token, canal.chatId, chartUrl, cap);
           await new Promise(r => setTimeout(r, 3000));
         }
         
@@ -385,8 +386,8 @@ async function sendChartToTelegram(token, chatId, chartUrl, caption) {
 
 async function sendComparativeChart(token, chatId, symbols) {
   const url = await getComparativeChartUrl(symbols);
-  return sendChartToTelegram(token, chatId, url, '📈 *Performance Comparative — 30 Jours*
-_Analyse multi-actifs N.O.V.A. — Naite Industries_');
+  const compCaption = 'Performance Comparative 30 Jours - Analyse N.O.V.A. - Naite Industries';
+  return sendChartToTelegram(token, chatId, url, compCaption);
 }
 
 // Schedule at 7h30 Paris time (UTC+2 = 5h30 UTC)
