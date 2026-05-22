@@ -160,7 +160,7 @@ function buildBarLineChartUrl(data, title) {
       }
     }
   };
-  return 'https://quickchart.io/chart?backgroundColor=%230a0d1a&width=900&height=450&c=' + encodeURIComponent(JSON.stringify(cfg));
+  return cfg; // Return config object for POST API
 }
 
 function buildComparativeChartUrl(datasets) {
@@ -219,14 +219,31 @@ function buildComparativeChartUrl(datasets) {
   return 'https://quickchart.io/chart?backgroundColor=%23050810&width=900&height=450&c=' + encodeURIComponent(JSON.stringify(cfg));
 }
 
-async function sendPhotoToTelegram(token, chatId, chartUrl, caption) {
+async function sendPhotoToTelegram(token, chatId, chartConfig, caption) {
   try {
-    console.log('Downloading chart from QuickChart...');
-    const imgRes = await fetch(chartUrl);
-    if (!imgRes.ok) { console.log('QuickChart error:', imgRes.status); return false; }
-    const arrayBuf = await imgRes.arrayBuffer();
-    const imgBuf = Buffer.from(arrayBuf);
-    console.log('Image downloaded, size:', imgBuf.length, 'bytes');
+    console.log('Generating chart via QuickChart POST...');
+    // Use POST to avoid URL length limits
+    const chartUrl = typeof chartConfig === 'string' ? chartConfig : null;
+    let imgBuf;
+    
+    if(chartUrl) {
+      // It's already a URL (comparative chart)
+      const imgRes = await fetch(chartUrl);
+      if (!imgRes.ok) { console.log('QuickChart error:', imgRes.status); return false; }
+      const arrayBuf = await imgRes.arrayBuffer();
+      imgBuf = Buffer.from(arrayBuf);
+    } else {
+      // Use POST API for individual charts
+      const postRes = await fetch('https://quickchart.io/chart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backgroundColor: '#0a0d1a', width: 900, height: 450, chart: chartConfig })
+      });
+      if (!postRes.ok) { console.log('QuickChart POST error:', postRes.status); return false; }
+      const arrayBuf = await postRes.arrayBuffer();
+      imgBuf = Buffer.from(arrayBuf);
+    }
+    console.log('Image ready, size:', imgBuf.length, 'bytes');
 
     const boundary = 'novabnd' + Date.now();
     const CRLF = '\r\n';
@@ -329,9 +346,9 @@ async function sendDailyReports() {
           console.log('Fetching data for', sym);
           const hData = await fetchHistoricalData(sym);
           if (!hData) { console.log('No data for', sym); continue; }
-          const chartUrl = buildBarLineChartUrl(hData, sym.replace('-USD', ''));
+          const chartCfg = buildBarLineChartUrl(hData, sym.replace('-USD', ''));
           const cap = sym.replace('-USD', '') + ' - Analyse 30 jours - N.O.V.A. ' + tier.toUpperCase();
-          const ok = await sendPhotoToTelegram(token, canal.chatId, chartUrl, cap);
+          const ok = await sendPhotoToTelegram(token, canal.chatId, chartCfg, cap);
           console.log(sym + ' chart:', ok ? 'OK' : 'FAIL');
           await new Promise(r => setTimeout(r, 4000));
         }
@@ -346,7 +363,7 @@ async function sendDailyReports() {
         }
         if (compDatasets.length >= 2) {
           const compUrl = buildComparativeChartUrl(compDatasets);
-          const ok = await sendPhotoToTelegram(token, canal.chatId, compUrl, 'Performance Comparative 30 Jours - N.O.V.A. ' + tier.toUpperCase());
+          const ok = await sendPhotoToTelegram(token, canal.chatId, compUrl, 'Performance Comparative 30 Jours - N.O.V.A. ' + tier.toUpperCase()); // compUrl is a string
           console.log('Comparative chart:', ok ? 'OK' : 'FAIL');
         }
       }
