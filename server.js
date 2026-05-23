@@ -104,7 +104,246 @@ app.get('/api/finance', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── CHART GENERATION ──
+// ── CANVAS CHART GENERATION ──
+const { createCanvas } = require('canvas');
+
+function drawBarLineChart(data, title) {
+  const W = 900, H = 480;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+
+  // Dark gradient background
+  const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+  bgGrad.addColorStop(0, '#050810');
+  bgGrad.addColorStop(1, '#0a0d1a');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  const prices = data.prices;
+  const volumes = data.volumes;
+  const labels = data.labels;
+  const isUp = prices[prices.length-1] >= prices[0];
+  const lineColor = isUp ? '#00e5ff' : '#ff4d6d';
+  const change = ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(2);
+
+  const sx = 75, sy = 55, cw = W - 100, ch = H - 110;
+  const maxP = Math.max(...prices) * 1.02;
+  const minP = Math.min(...prices) * 0.98;
+  const maxV = Math.max(...volumes) || 1;
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,180,255,0.07)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 6; i++) {
+    const y = sy + ch * i / 6;
+    ctx.beginPath(); ctx.moveTo(sx, y); ctx.lineTo(sx + cw, y); ctx.stroke();
+  }
+  for (let i = 0; i <= 10; i++) {
+    const x = sx + cw * i / 10;
+    ctx.beginPath(); ctx.moveTo(x, sy); ctx.lineTo(x, sy + ch); ctx.stroke();
+  }
+
+  // Volume bars
+  const bw = cw / prices.length * 0.6;
+  volumes.forEach((v, i) => {
+    const x = sx + i * (cw / prices.length) + bw * 0.2;
+    const bh = (v / maxV) * ch * 0.3;
+    const y = sy + ch - bh;
+    const g = ctx.createLinearGradient(0, y, 0, y + bh);
+    g.addColorStop(0, 'rgba(0,150,255,0.5)');
+    g.addColorStop(1, 'rgba(0,80,200,0.1)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y, bw, bh);
+  });
+
+  // Price area fill
+  ctx.beginPath();
+  prices.forEach((p, i) => {
+    const x = sx + i * (cw / (prices.length - 1));
+    const y = sy + ch - ((p - minP) / (maxP - minP)) * ch;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.lineTo(sx + cw, sy + ch);
+  ctx.lineTo(sx, sy + ch);
+  ctx.closePath();
+  const areaGrad = ctx.createLinearGradient(0, sy, 0, sy + ch);
+  areaGrad.addColorStop(0, isUp ? 'rgba(0,229,255,0.18)' : 'rgba(255,77,109,0.18)');
+  areaGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = areaGrad;
+  ctx.fill();
+
+  // Price line with glow
+  for (let pass = 0; pass < 3; pass++) {
+    ctx.save();
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur = pass === 0 ? 20 : pass === 1 ? 10 : 0;
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = pass === 2 ? 2.5 : 1;
+    ctx.beginPath();
+    prices.forEach((p, i) => {
+      const x = sx + i * (cw / (prices.length - 1));
+      const y = sy + ch - ((p - minP) / (maxP - minP)) * ch;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Arrow at the end
+  const lastX = sx + cw;
+  const lastY = sy + ch - ((prices[prices.length-1] - minP) / (maxP - minP)) * ch;
+  const prevY = sy + ch - ((prices[prices.length-2] - minP) / (maxP - minP)) * ch;
+  const arrowUp = lastY < prevY;
+  ctx.save();
+  ctx.shadowColor = lineColor; ctx.shadowBlur = 25;
+  ctx.fillStyle = lineColor;
+  ctx.beginPath();
+  if (arrowUp) {
+    ctx.moveTo(lastX, lastY - 14);
+    ctx.lineTo(lastX - 8, lastY + 2);
+    ctx.lineTo(lastX + 8, lastY + 2);
+  } else {
+    ctx.moveTo(lastX, lastY + 14);
+    ctx.lineTo(lastX - 8, lastY - 2);
+    ctx.lineTo(lastX + 8, lastY - 2);
+  }
+  ctx.fill();
+  ctx.restore();
+
+  // Y axis labels
+  ctx.fillStyle = 'rgba(100,160,200,0.7)';
+  ctx.font = '10px monospace';
+  for (let i = 0; i <= 4; i++) {
+    const p = minP + (maxP - minP) * (4 - i) / 4;
+    ctx.fillText('$' + p.toFixed(0), 4, sy + ch * i / 4 + 4);
+  }
+
+  // X axis labels
+  ctx.fillStyle = 'rgba(80,120,150,0.6)';
+  ctx.font = '9px monospace';
+  labels.forEach((l, i) => {
+    if (i % 4 === 0) {
+      const x = sx + i * (cw / (labels.length - 1));
+      ctx.fillText(l, x - 10, sy + ch + 16);
+    }
+  });
+
+  // Title
+  ctx.fillStyle = '#d0e8f8';
+  ctx.font = 'bold 16px Arial';
+  ctx.fillText(title + '  |  N.O.V.A. — Naite Industries', sx, 34);
+
+  // Change badge
+  ctx.fillStyle = isUp ? '#00ff88' : '#ff6b6b';
+  ctx.font = 'bold 14px Arial';
+  ctx.fillText((isUp ? '▲ +' : '▼ ') + change + '%', W - 110, 34);
+
+  // Watermark
+  ctx.fillStyle = 'rgba(0,180,255,0.2)';
+  ctx.font = '11px Arial';
+  ctx.fillText('N.O.V.A. AI — Naite Industries © 2026', W / 2 - 110, H - 8);
+
+  return canvas.toBuffer('image/png');
+}
+
+function drawComparativeChart(datasets, title) {
+  const W = 900, H = 480;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+
+  // Background
+  const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+  bgGrad.addColorStop(0, '#040608');
+  bgGrad.addColorStop(1, '#080c14');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  const sx = 65, sy = 70, cw = W - 100, ch = H - 120;
+  let allVals = [];
+  datasets.forEach(d => allVals = allVals.concat(d.data));
+  const maxV = Math.max(...allVals) * 1.1;
+  const minV = Math.min(Math.min(...allVals) * 1.1, -1);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 6; i++) {
+    const y = sy + ch * i / 6;
+    ctx.beginPath(); ctx.moveTo(sx, y); ctx.lineTo(sx + cw, y); ctx.stroke();
+    const v = maxV - (maxV - minV) * i / 6;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = '10px monospace';
+    ctx.fillText(v.toFixed(1) + '%', 2, y + 4);
+  }
+
+  // Zero line
+  if (minV < 0) {
+    const zy = sy + ch * maxV / (maxV - minV);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(sx, zy); ctx.lineTo(sx + cw, zy); ctx.stroke();
+    ctx.restore();
+  }
+
+  const colors = ['#00e5ff', '#ffd60a', '#ff4d6d', '#00ff88'];
+
+  datasets.forEach((ds, di) => {
+    const color = colors[di % colors.length];
+    // Glow effect
+    for (let pass = 0; pass < 3; pass++) {
+      ctx.save();
+      ctx.shadowColor = color;
+      ctx.shadowBlur = pass === 0 ? 18 : pass === 1 ? 8 : 0;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = pass === 2 ? 2.5 : 1;
+      ctx.beginPath();
+      ds.data.forEach((v, i) => {
+        const x = sx + i * (cw / (ds.data.length - 1));
+        const y = sy + ch - ((v - minV) / (maxV - minV)) * ch;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+    // End dot
+    const lastV = ds.data[ds.data.length - 1];
+    const lastX = sx + cw;
+    const lastY = sy + ch - ((lastV - minV) / (maxV - minV)) * ch;
+    ctx.save();
+    ctx.shadowColor = color; ctx.shadowBlur = 15;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(lastX, lastY, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // End label
+    ctx.fillStyle = color;
+    ctx.font = 'bold 11px Arial';
+    ctx.fillText(ds.label + ' ' + (lastV >= 0 ? '+' : '') + lastV.toFixed(1) + '%', lastX - 90, lastY - 10);
+  });
+
+  // Legend
+  datasets.forEach((ds, di) => {
+    const color = colors[di % colors.length];
+    ctx.fillStyle = color;
+    ctx.fillRect(40 + di * 180, H - 28, 20, 3);
+    ctx.fillStyle = 'rgba(200,220,240,0.7)';
+    ctx.font = '11px Arial';
+    ctx.fillText(ds.label, 65 + di * 180, H - 18);
+  });
+
+  // Title
+  ctx.fillStyle = '#d0e8f8';
+  ctx.font = 'bold 16px Arial';
+  ctx.fillText(title + '  |  N.O.V.A. — Naite Industries', sx, 44);
+
+  ctx.fillStyle = 'rgba(0,180,255,0.2)';
+  ctx.font = '11px Arial';
+  ctx.fillText('N.O.V.A. AI — Naite Industries © 2026', W / 2 - 110, H - 8);
+
+  return canvas.toBuffer('image/png');
+}
+
 async function fetchHistoricalData(symbol) {
   try {
     // Use Yahoo Finance for historical data - no limits
@@ -127,38 +366,7 @@ async function fetchHistoricalData(symbol) {
   } catch (e) { console.log('fetchHistorical error:', e.message); return null; }
 }
 
-function buildBarLineChartUrl(data, title) {
-  const prices = data.prices.slice(-20).map(p => Math.round(p));
-  const labels = data.labels.slice(-20);
-  const isUp = prices[prices.length-1] >= prices[0];
-  const change = prices[0] > 0 ? ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(1) : '0';
-  return {
-    type: 'line',
-    data: {
-      labels: labels,
-      datasets: [{
-        label: title + ' (' + (isUp ? '+' : '') + change + '%)',
-        data: prices,
-        borderColor: isUp ? '#00e5ff' : '#ff4d6d',
-        backgroundColor: isUp ? 'rgba(0,229,255,0.15)' : 'rgba(255,77,109,0.15)',
-        borderWidth: 3,
-        fill: true,
-        tension: 0.4,
-        pointRadius: 0
-      }]
-    },
-    options: {
-      plugins: {
-        legend: { labels: { color: '#a0c4d8', font: { size: 12 } } },
-        title: { display: true, text: title + ' | N.O.V.A. Naite Industries', color: '#e0f0ff', font: { size: 14, weight: 'bold' } }
-      },
-      scales: {
-        x: { ticks: { color: '#4a6a7a', font: { size: 9 }, maxTicksLimit: 8 }, grid: { color: 'rgba(0,180,255,0.06)' } },
-        y: { ticks: { color: '#6a9ab0', font: { size: 9 } }, grid: { color: 'rgba(0,180,255,0.08)' } }
-      }
-    }
-  };
-}
+
 
 function buildComparativeChartUrl(datasets) {
   const colors = ['#00e5ff', '#ffd60a', '#ff4d6d', '#00ff88'];
@@ -216,40 +424,9 @@ function buildComparativeChartUrl(datasets) {
   return 'https://quickchart.io/chart?backgroundColor=%23050810&width=900&height=450&c=' + encodeURIComponent(JSON.stringify(cfg));
 }
 
-async function sendPhotoToTelegram(token, chatId, chartConfig, caption) {
+async function sendPhotoToTelegram(token, chatId, imgBuf, caption) {
   try {
-    console.log('Generating chart via QuickChart POST...');
-    // Use POST to avoid URL length limits
-    const chartUrl = typeof chartConfig === 'string' ? chartConfig : null;
-    let imgBuf;
-    
-    if(chartUrl) {
-      // It's already a URL (comparative chart)
-      const imgRes = await fetch(chartUrl);
-      if (!imgRes.ok) { console.log('QuickChart error:', imgRes.status); return false; }
-      const arrayBuf = await imgRes.arrayBuffer();
-      imgBuf = Buffer.from(arrayBuf);
-    } else {
-      // Use POST API for individual charts
-      const postBody = {
-        backgroundColor: '#0a0d1a',
-        width: 900,
-        height: 450,
-        format: 'png',
-        chart: JSON.stringify(chartConfig)
-      };
-      const postRes = await fetch('https://quickchart.io/chart', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(postBody)
-      });
-      const arrayBuf = await postRes.arrayBuffer();
-      imgBuf = Buffer.from(arrayBuf);
-      console.log('QuickChart POST status:', postRes.status, 'size:', imgBuf.length);
-      // Accept if we got a valid PNG (starts with PNG header)
-      if (imgBuf.length < 1000) { console.log('Image too small, skipping'); return false; }
-    }
-    console.log('Image ready, size:', imgBuf.length, 'bytes');
+    console.log('Sending photo, size:', imgBuf.length, 'bytes');
 
     const boundary = 'novabnd' + Date.now();
     const CRLF = '\r\n';
@@ -352,9 +529,9 @@ async function sendDailyReports() {
           console.log('Fetching data for', sym);
           const hData = await fetchHistoricalData(sym);
           if (!hData) { console.log('No data for', sym); continue; }
-          const chartCfg = buildBarLineChartUrl(hData, sym.replace('-USD', ''));
+          const imgBuf = drawBarLineChart(hData, sym.replace('-USD', ''));
           const cap = sym.replace('-USD', '') + ' - Analyse 30 jours - N.O.V.A. ' + tier.toUpperCase();
-          const ok = await sendPhotoToTelegram(token, canal.chatId, chartCfg, cap);
+          const ok = await sendPhotoToTelegram(token, canal.chatId, imgBuf, cap);
           console.log(sym + ' chart:', ok ? 'OK' : 'FAIL');
           await new Promise(r => setTimeout(r, 4000));
         }
@@ -368,8 +545,8 @@ async function sendDailyReports() {
           await new Promise(r => setTimeout(r, 2000));
         }
         if (compDatasets.length >= 2) {
-          const compUrl = buildComparativeChartUrl(compDatasets);
-          const ok = await sendPhotoToTelegram(token, canal.chatId, compUrl, 'Performance Comparative 30 Jours - N.O.V.A. ' + tier.toUpperCase()); // compUrl is a string
+          const compBuf = drawComparativeChart(compDatasets, 'Performance Comparative - 30 Jours');
+          const ok = await sendPhotoToTelegram(token, canal.chatId, compBuf, 'Performance Comparative 30 Jours - N.O.V.A. ' + tier.toUpperCase());
           console.log('Comparative chart:', ok ? 'OK' : 'FAIL');
         }
       }
