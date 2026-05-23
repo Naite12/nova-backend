@@ -128,39 +128,36 @@ async function fetchHistoricalData(symbol) {
 }
 
 function buildBarLineChartUrl(data, title) {
-  const prices = data.prices;
-  const isUp = prices[prices.length-1] >= prices[0];
-  const lineColor = isUp ? '#00e5ff' : '#ff4d6d';
-  const fillColor = isUp ? 'rgba(0,229,255,0.12)' : 'rgba(255,77,109,0.10)';
-  const barColor = isUp ? 'rgba(0,150,255,0.35)' : 'rgba(255,100,100,0.25)';
-  const change = ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(2);
-  // Use only last 20 points and round prices to reduce URL length
+  const prices = data.prices.slice(-20).map(p => Math.round(p));
   const labels = data.labels.slice(-20);
-  const roundedPrices = prices.slice(-20).map(p => Math.round(p));
-  const roundedVols = data.volumes.slice(-20).map(v => Math.round(v/1000));
-  const cfg = {
-    type: 'bar',
+  const isUp = prices[prices.length-1] >= prices[0];
+  const change = prices[0] > 0 ? ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(1) : '0';
+  return {
+    type: 'line',
     data: {
-      labels,
-      datasets: [
-        { type:'line', label: title+'('+(isUp?'+':'')+change+'%)', data: roundedPrices, borderColor: lineColor, backgroundColor: fillColor, borderWidth:2.5, fill:true, tension:0.4, pointRadius:0, yAxisID:'y1', order:1 },
-        { type:'bar', label:'Vol(K)', data: roundedVols, backgroundColor: barColor, borderWidth:0, yAxisID:'y2', order:2 }
-      ]
+      labels: labels,
+      datasets: [{
+        label: title + ' (' + (isUp ? '+' : '') + change + '%)',
+        data: prices,
+        borderColor: isUp ? '#00e5ff' : '#ff4d6d',
+        backgroundColor: isUp ? 'rgba(0,229,255,0.15)' : 'rgba(255,77,109,0.15)',
+        borderWidth: 3,
+        fill: true,
+        tension: 0.4,
+        pointRadius: 0
+      }]
     },
     options: {
-      animation:false,
       plugins: {
-        legend:{ labels:{ color:'#a0c4d8', font:{size:11} } },
-        title:{ display:true, text: title+' | N.O.V.A.', color:'#e0f0ff', font:{size:13,weight:'bold'} }
+        legend: { labels: { color: '#a0c4d8', font: { size: 12 } } },
+        title: { display: true, text: title + ' | N.O.V.A. Naite Industries', color: '#e0f0ff', font: { size: 14, weight: 'bold' } }
       },
       scales: {
-        x:{ ticks:{color:'#4a6a7a',font:{size:8},maxTicksLimit:8}, grid:{color:'rgba(0,180,255,0.06)'} },
-        y1:{ position:'left', ticks:{color:'#6a9ab0',font:{size:9}}, grid:{color:'rgba(0,180,255,0.08)'} },
-        y2:{ position:'right', ticks:{color:'rgba(0,150,255,0.4)',font:{size:8}}, grid:{display:false} }
+        x: { ticks: { color: '#4a6a7a', font: { size: 9 }, maxTicksLimit: 8 }, grid: { color: 'rgba(0,180,255,0.06)' } },
+        y: { ticks: { color: '#6a9ab0', font: { size: 9 } }, grid: { color: 'rgba(0,180,255,0.08)' } }
       }
     }
   };
-  return cfg; // Return config object for POST API
 }
 
 function buildComparativeChartUrl(datasets) {
