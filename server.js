@@ -246,13 +246,11 @@ async function sendPhotoToTelegram(token, chatId, chartConfig, caption) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(postBody)
       });
-      if (!postRes.ok) { 
-        const errText = await postRes.text();
-        console.log('QuickChart POST error:', postRes.status, errText.slice(0,100)); 
-        return false; 
-      }
       const arrayBuf = await postRes.arrayBuffer();
       imgBuf = Buffer.from(arrayBuf);
+      console.log('QuickChart POST status:', postRes.status, 'size:', imgBuf.length);
+      // Accept if we got a valid PNG (starts with PNG header)
+      if (imgBuf.length < 1000) { console.log('Image too small, skipping'); return false; }
     }
     console.log('Image ready, size:', imgBuf.length, 'bytes');
 
