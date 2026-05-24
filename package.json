@@ -8,6 +8,6 @@
     "stripe": "^14.21.0",
     "cors": "^2.8.5",
     "chartjs-node-canvas": "^4.1.6",
-    "chart.js": "^4.4.1"
+    "chart.js": "^3.9.1"
   }
 }
