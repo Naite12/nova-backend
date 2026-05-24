@@ -104,97 +104,101 @@ app.get('/api/finance', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── CHART GENERATION WITH CHARTJS-NODE-CANVAS ──
-const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
-const chartCanvas = new ChartJSNodeCanvas({ width: 900, height: 480, backgroundColour: '#050810' });
+// ── CANVAS CHART GENERATION ──
+const { createCanvas } = require('canvas');
 
-async function drawBarLineChart(data, title) {
+function drawBarLineChart(data, title) {
+  const W = 900, H = 480;
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#050810';
+  ctx.fillRect(0, 0, W, H);
   const prices = data.prices;
   const volumes = data.volumes;
   const labels = data.labels;
   const isUp = prices[prices.length-1] >= prices[0];
   const lineColor = isUp ? '#00e5ff' : '#ff4d6d';
-  const fillColor = isUp ? 'rgba(0,229,255,0.15)' : 'rgba(255,77,109,0.15)';
   const change = ((prices[prices.length-1] - prices[0]) / prices[0] * 100).toFixed(2);
-  const maxVol = Math.max(...volumes) || 1;
-  const normalizedVols = volumes.map(v => (v / maxVol) * Math.max(...prices) * 0.3);
-
-  const config = {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        {
-          type: 'line',
-          label: title + ' (' + (isUp ? '+' : '') + change + '%)',
-          data: prices,
-          borderColor: lineColor,
-          backgroundColor: fillColor,
-          borderWidth: 3,
-          fill: true,
-          tension: 0.4,
-          pointRadius: 0,
-          yAxisID: 'y'
-        },
-        {
-          type: 'bar',
-          label: 'Volume',
-          data: normalizedVols,
-          backgroundColor: 'rgba(0,150,255,0.25)',
-          borderWidth: 0,
-          yAxisID: 'y'
-        }
-      ]
-    },
-    options: {
-      animation: false,
-      plugins: {
-        legend: { labels: { color: '#a0c4d8', font: { size: 12 } } },
-        title: { display: true, text: title + ' | N.O.V.A. — Naite Industries', color: '#e0f0ff', font: { size: 15, weight: 'bold' } }
-      },
-      scales: {
-        x: { ticks: { color: '#4a6a7a', font: { size: 9 }, maxTicksLimit: 10 }, grid: { color: 'rgba(0,180,255,0.06)' } },
-        y: { ticks: { color: '#6a9ab0', font: { size: 9 } }, grid: { color: 'rgba(0,180,255,0.08)' } }
-      }
-    }
-  };
-  return await chartCanvas.renderToBuffer(config);
+  const sx = 75, sy = 55, cw = W-100, ch = H-110;
+  const maxP = Math.max(...prices)*1.02, minP = Math.min(...prices)*0.98;
+  const maxV = Math.max(...volumes)||1;
+  // Grid
+  ctx.strokeStyle='rgba(0,180,255,0.07)';ctx.lineWidth=0.5;
+  for(let i=0;i<=6;i++){const y=sy+ch*i/6;ctx.beginPath();ctx.moveTo(sx,y);ctx.lineTo(sx+cw,y);ctx.stroke();}
+  // Volumes
+  const bw=cw/prices.length*0.6;
+  volumes.forEach((v,i)=>{
+    const x=sx+i*(cw/prices.length)+bw*0.2;
+    const bh=(v/maxV)*ch*0.3;
+    const y=sy+ch-bh;
+    const g=ctx.createLinearGradient(0,y,0,y+bh);
+    g.addColorStop(0,'rgba(0,150,255,0.5)');g.addColorStop(1,'rgba(0,80,200,0.1)');
+    ctx.fillStyle=g;ctx.fillRect(x,y,bw,bh);
+  });
+  // Area fill
+  ctx.beginPath();
+  prices.forEach((p,i)=>{const x=sx+i*(cw/(prices.length-1));const y=sy+ch-((p-minP)/(maxP-minP))*ch;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+  ctx.lineTo(sx+cw,sy+ch);ctx.lineTo(sx,sy+ch);ctx.closePath();
+  const ag=ctx.createLinearGradient(0,sy,0,sy+ch);
+  ag.addColorStop(0,isUp?'rgba(0,229,255,0.18)':'rgba(255,77,109,0.18)');ag.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=ag;ctx.fill();
+  // Line with glow
+  for(let pass=0;pass<3;pass++){
+    ctx.save();ctx.shadowColor=lineColor;ctx.shadowBlur=pass===0?20:pass===1?10:0;
+    ctx.strokeStyle=lineColor;ctx.lineWidth=pass===2?2.5:1;ctx.beginPath();
+    prices.forEach((p,i)=>{const x=sx+i*(cw/(prices.length-1));const y=sy+ch-((p-minP)/(maxP-minP))*ch;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+    ctx.stroke();ctx.restore();
+  }
+  // Arrow
+  const lx=sx+cw;
+  const ly=sy+ch-((prices[prices.length-1]-minP)/(maxP-minP))*ch;
+  const py=sy+ch-((prices[prices.length-2]-minP)/(maxP-minP))*ch;
+  ctx.save();ctx.shadowColor=lineColor;ctx.shadowBlur=25;ctx.fillStyle=lineColor;ctx.beginPath();
+  if(ly<py){ctx.moveTo(lx,ly-14);ctx.lineTo(lx-8,ly+2);ctx.lineTo(lx+8,ly+2);}
+  else{ctx.moveTo(lx,ly+14);ctx.lineTo(lx-8,ly-2);ctx.lineTo(lx+8,ly-2);}
+  ctx.fill();ctx.restore();
+  // Labels
+  ctx.fillStyle='rgba(100,160,200,0.7)';ctx.font='10px monospace';
+  for(let i=0;i<=4;i++){const p=minP+(maxP-minP)*(4-i)/4;ctx.fillText('$'+p.toFixed(0),4,sy+ch*i/4+4);}
+  ctx.fillStyle='rgba(80,120,150,0.6)';ctx.font='9px monospace';
+  labels.forEach((l,i)=>{if(i%4===0){const x=sx+i*(cw/(labels.length-1));ctx.fillText(l,x-10,sy+ch+16);}});
+  // Title
+  ctx.fillStyle='#d0e8f8';ctx.font='bold 16px Arial';
+  ctx.fillText(title+' | N.O.V.A. Naite Industries',sx,34);
+  ctx.fillStyle=isUp?'#00ff88':'#ff6b6b';ctx.font='bold 14px Arial';
+  ctx.fillText((isUp?'+ ':'- ')+Math.abs(change)+'%',W-100,34);
+  ctx.fillStyle='rgba(0,180,255,0.2)';ctx.font='11px Arial';
+  ctx.fillText('N.O.V.A. AI Naite Industries 2026',W/2-100,H-8);
+  return canvas.toBuffer('image/png');
 }
 
-async function drawComparativeChart(datasets, title) {
-  const colors = ['#00e5ff', '#ffd60a', '#ff4d6d', '#00ff88'];
-  const labels = Array.from({ length: 30 }, (_, i) => 'J' + (i + 1));
-  const config = {
-    type: 'line',
-    data: {
-      labels,
-      datasets: datasets.map((ds, i) => {
-        const lastVal = ds.data[ds.data.length - 1];
-        return {
-          label: ds.label + ' (' + (lastVal >= 0 ? '+' : '') + lastVal.toFixed(1) + '%)',
-          data: ds.data,
-          borderColor: colors[i % colors.length],
-          backgroundColor: 'transparent',
-          borderWidth: 2.5,
-          tension: 0.4,
-          pointRadius: 0,
-          fill: false
-        };
-      })
-    },
-    options: {
-      animation: false,
-      plugins: {
-        legend: { labels: { color: '#a0c4d8', font: { size: 11 } } },
-        title: { display: true, text: title + ' | N.O.V.A. — Naite Industries', color: '#e0f0ff', font: { size: 15, weight: 'bold' } }
-      },
-      scales: {
-        x: { ticks: { color: '#4a6a7a', font: { size: 8 }, maxTicksLimit: 10 }, grid: { color: 'rgba(0,180,255,0.06)' } },
-        y: { ticks: { color: '#6a9ab0', font: { size: 9 }, callback: v => v + '%' }, grid: { color: 'rgba(0,180,255,0.08)' } }
-      }
+function drawComparativeChart(datasets, title) {
+  const W=900,H=480;const canvas=createCanvas(W,H);const ctx=canvas.getContext('2d');
+  ctx.fillStyle='#040608';ctx.fillRect(0,0,W,H);
+  const sx=65,sy=70,cw=W-100,ch=H-120;
+  let all=[];datasets.forEach(d=>all=all.concat(d.data));
+  const maxV=Math.max(...all)*1.1,minV=Math.min(Math.min(...all)*1.1,-1);
+  ctx.strokeStyle='rgba(255,255,255,0.04)';ctx.lineWidth=0.5;
+  for(let i=0;i<=6;i++){const y=sy+ch*i/6;ctx.beginPath();ctx.moveTo(sx,y);ctx.lineTo(sx+cw,y);ctx.stroke();
+    const v=maxV-(maxV-minV)*i/6;ctx.fillStyle='rgba(255,255,255,0.35)';ctx.font='10px monospace';ctx.fillText(v.toFixed(1)+'%',2,y+4);}
+  if(minV<0){const zy=sy+ch*maxV/(maxV-minV);ctx.save();ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=1;ctx.setLineDash([6,4]);ctx.beginPath();ctx.moveTo(sx,zy);ctx.lineTo(sx+cw,zy);ctx.stroke();ctx.restore();}
+  const colors=['#00e5ff','#ffd60a','#ff4d6d','#00ff88'];
+  datasets.forEach((ds,di)=>{
+    const color=colors[di%colors.length];
+    for(let pass=0;pass<3;pass++){
+      ctx.save();ctx.shadowColor=color;ctx.shadowBlur=pass===0?18:pass===1?8:0;
+      ctx.strokeStyle=color;ctx.lineWidth=pass===2?2.5:1;ctx.beginPath();
+      ds.data.forEach((v,i)=>{const x=sx+i*(cw/(ds.data.length-1));const y=sy+ch-((v-minV)/(maxV-minV))*ch;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+      ctx.stroke();ctx.restore();
     }
-  };
-  return await chartCanvas.renderToBuffer(config);
+    const lv=ds.data[ds.data.length-1];const lx=sx+cw;const ly=sy+ch-((lv-minV)/(maxV-minV))*ch;
+    ctx.save();ctx.shadowColor=color;ctx.shadowBlur=15;ctx.fillStyle=color;ctx.beginPath();ctx.arc(lx,ly,5,0,Math.PI*2);ctx.fill();ctx.restore();
+    ctx.fillStyle=color;ctx.font='bold 11px Arial';ctx.fillText(ds.label+' '+(lv>=0?'+':'')+lv.toFixed(1)+'%',lx-90,ly-10);
+  });
+  datasets.forEach((ds,di)=>{const color=colors[di%colors.length];ctx.fillStyle=color;ctx.fillRect(40+di*180,H-28,20,3);ctx.fillStyle='rgba(200,220,240,0.7)';ctx.font='11px Arial';ctx.fillText(ds.label,65+di*180,H-18);});
+  ctx.fillStyle='#d0e8f8';ctx.font='bold 16px Arial';ctx.fillText(title+' | N.O.V.A.',sx,44);
+  ctx.fillStyle='rgba(0,180,255,0.2)';ctx.font='11px Arial';ctx.fillText('N.O.V.A. AI Naite Industries 2026',W/2-100,H-8);
+  return canvas.toBuffer('image/png');
 }
 
 async function fetchHistoricalData(symbol) {
@@ -382,7 +386,7 @@ async function sendDailyReports() {
           console.log('Fetching data for', sym);
           const hData = await fetchHistoricalData(sym);
           if (!hData) { console.log('No data for', sym); continue; }
-          const imgBuf = await drawBarLineChart(hData, sym.replace('-USD', ''));
+          const imgBuf = drawBarLineChart(hData, sym.replace('-USD', ''));
           const cap = sym.replace('-USD', '') + ' - Analyse 30 jours - N.O.V.A. ' + tier.toUpperCase();
           const ok = await sendPhotoToTelegram(token, canal.chatId, imgBuf, cap);
           console.log(sym + ' chart:', ok ? 'OK' : 'FAIL');
@@ -398,7 +402,7 @@ async function sendDailyReports() {
           await new Promise(r => setTimeout(r, 2000));
         }
         if (compDatasets.length >= 2) {
-          const compBuf = await drawComparativeChart(compDatasets, 'Performance Comparative - 30 Jours');
+          const compBuf = drawComparativeChart(compDatasets, 'Performance Comparative - 30 Jours');
           const ok = await sendPhotoToTelegram(token, canal.chatId, compBuf, 'Performance Comparative 30 Jours - N.O.V.A. ' + tier.toUpperCase());
           console.log('Comparative chart:', ok ? 'OK' : 'FAIL');
         }
