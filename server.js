@@ -335,8 +335,8 @@ async function fetchMarketData() {
 
 async function generateDailyReport(tier, marketData, date) {
   const mktStr = Object.entries(marketData).map(([s, d]) => s + ': $' + d.price?.toFixed(2) + ' (' + (d.change >= 0 ? '+' : '') + d.change + '%)').join(', ');
-  const styles = { free: 'tres court, resume uniquement, 80 mots max', essential: 'standard, 150 mots', premium: 'complet et detaille, 250 mots', vip: 'premium exclusif avec recommandation personnalisee, 300 mots' };
-  const prompt = 'Genere un rapport quotidien ' + styles[tier] + ' pour abonnes ' + tier.toUpperCase() + '. DATE: ' + date + '. MARCHES: ' + mktStr + '. Sections: BILAN DES MARCHES, SIGNAUX DU JOUR (ACHETER/VENDRE/CONSERVER), RECOMMANDATION N.O.V.A. Texte brut sans asterisques.';
+  const styles = { free: 'very short, summary only, 80 words max', essential: 'standard, 150 words', premium: 'complete and detailed, 250 words', vip: 'exclusive premium with personalized recommendation, 300 words' };
+  const prompt = 'Generate a daily market report in English, style ' + styles[tier] + ' for ' + tier.toUpperCase() + ' subscribers. DATE: ' + date + '. MARKETS: ' + mktStr + '. Sections: MARKET OVERVIEW, SIGNALS (BUY/SELL/HOLD), N.O.V.A. RECOMMENDATION. Plain text no asterisks.';
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
@@ -356,7 +356,7 @@ function buildTieredMessage(tier, date, marketData, reportText) {
     premium: '\n' + sep + '\nGraphiques analyses envoyes separement',
     vip: '\n' + sep + '\nACCES APP N.O.V.A. COMPLETE: nova-vip1.netlify.app'
   };
-  return 'RAPPORT N.O.V.A. ' + emojis[tier] + ' - ' + date + '\nNaite Industries\n\n' + sep + '\nMARCHES EN TEMPS REEL\n' + mkt + '\n\n' + sep + '\n' + reportText + (footers[tier] || '') + '\n\n---\nNon constitutif dun conseil en investissement';
+  return 'N.O.V.A. REPORT ' + emojis[tier] + ' - ' + date + '\nNaite Industries\n\n' + sep + '\nLIVE MARKETS\n' + mkt + '\n\n' + sep + '\n' + reportText + (footers[tier] || '') + '\n\n---\nNot financial advice. Always DYOR.';
 }
 
 async function sendDailyReports() {
