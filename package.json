@@ -6,7 +6,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "stripe": "^14.21.0",
-    "cors": "^2.8.5",
-    "canvas": "^2.11.2"
+    "cors": "^2.8.5"
   }
 }
