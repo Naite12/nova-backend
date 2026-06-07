@@ -2,79 +2,154 @@ const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const cors = require('cors');
 const crypto = require('crypto');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── IN-MEMORY DB ──
-const users = {};
+// ── POSTGRESQL ──
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ── INIT DATABASE ──
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        email TEXT PRIMARY KEY,
+        password TEXT NOT NULL,
+        plan TEXT DEFAULT 'vip',
+        created_at TIMESTAMP DEFAULT NOW(),
+        memory JSONB DEFAULT '{"facts":[],"conversations":0}',
+        chat_history JSONB DEFAULT '[]'
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS predictions (
+        id SERIAL PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        name TEXT,
+        signal TEXT NOT NULL,
+        price DECIMAL NOT NULL,
+        confidence INTEGER DEFAULT 70,
+        reasoning TEXT,
+        date TIMESTAMP DEFAULT NOW(),
+        date_str TEXT,
+        verified_7d BOOLEAN DEFAULT FALSE,
+        verified_30d BOOLEAN DEFAULT FALSE,
+        price_after_7d DECIMAL,
+        price_after_30d DECIMAL,
+        result_7d DECIMAL,
+        result_30d DECIMAL,
+        correct_7d BOOLEAN,
+        correct_30d BOOLEAN
+      )
+    `);
+    console.log('Database initialized');
+  } catch(e) {
+    console.log('DB init error:', e.message);
+  }
+}
+initDB();
+
+// ── SESSION STORE (memory is fine for sessions) ──
 const sessions = {};
-let predictions = [];
-let predictionId = 1;
 
 function genToken() { return crypto.randomBytes(32).toString('hex'); }
 function hashPassword(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
 
 // ── AUTH ──
-app.post('/auth/register', (req, res) => {
+app.post('/auth/register', async (req, res) => {
   const { email, password, plan } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-  if (users[email]) return res.status(400).json({ error: 'Account already exists' });
-  users[email] = { email, password: hashPassword(password), plan: plan || 'vip', createdAt: new Date().toISOString(), chatHistory: [], memory: { facts: [], conversations: 0 } };
-  const token = genToken();
-  sessions[token] = email;
-  res.json({ token, email, plan: users[email].plan });
+  try {
+    const existing = await pool.query('SELECT email FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'Account already exists' });
+    await pool.query('INSERT INTO users (email, password, plan) VALUES ($1, $2, $3)', [email, hashPassword(password), plan || 'vip']);
+    const token = genToken();
+    sessions[token] = email;
+    res.json({ token, email, plan: plan || 'vip' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
-  const user = users[email];
-  if (!user || user.password !== hashPassword(password)) return res.status(401).json({ error: 'Invalid credentials' });
-  const token = genToken();
-  sessions[token] = email;
-  res.json({ token, email, plan: user.plan });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
+    if (!user || user.password !== hashPassword(password)) return res.status(401).json({ error: 'Invalid credentials' });
+    const token = genToken();
+    sessions[token] = email;
+    res.json({ token, email, plan: user.plan });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/auth/change-password', (req, res) => {
+app.post('/auth/change-password', async (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token || !sessions[token]) return res.status(401).json({ error: 'Unauthorized' });
-  const user = users[sessions[token]];
-  if (!user) return res.status(401).json({ error: 'User not found' });
   const { password } = req.body;
   if (!password || password.length < 8) return res.status(400).json({ error: 'Password too short' });
-  user.password = hashPassword(password);
-  res.json({ ok: true });
+  try {
+    await pool.query('UPDATE users SET password = $1 WHERE email = $2', [hashPassword(password), sessions[token]]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token || !sessions[token]) return res.status(401).json({ error: 'Unauthorized' });
   req.userEmail = sessions[token];
-  req.user = users[req.userEmail];
   next();
 }
 
-app.get('/user/data', auth, (req, res) => {
-  const u = req.user;
-  res.json({ email: u.email, plan: u.plan, memory: u.memory, chatHistory: u.chatHistory.slice(-50) });
+app.get('/user/data', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [req.userEmail]);
+    const u = result.rows[0];
+    if (!u) return res.status(404).json({ error: 'User not found' });
+    res.json({ email: u.email, plan: u.plan, memory: u.memory, chatHistory: (u.chat_history || []).slice(-50) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/user/chat', auth, (req, res) => {
+
+app.post('/user/chat', auth, async (req, res) => {
   const { message, role } = req.body;
-  req.user.chatHistory.push({ role, message, time: new Date().toISOString() });
-  if (req.user.chatHistory.length > 100) req.user.chatHistory = req.user.chatHistory.slice(-100);
-  res.json({ ok: true });
+  try {
+    const result = await pool.query('SELECT chat_history FROM users WHERE email = $1', [req.userEmail]);
+    const hist = result.rows[0]?.chat_history || [];
+    hist.push({ role, message, time: new Date().toISOString() });
+    if (hist.length > 100) hist.splice(0, hist.length - 100);
+    await pool.query('UPDATE users SET chat_history = $1 WHERE email = $2', [JSON.stringify(hist), req.userEmail]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/user/memory', auth, (req, res) => {
+
+app.post('/user/memory', auth, async (req, res) => {
   const { fact } = req.body;
-  if (fact) { req.user.memory.facts.push(fact); if (req.user.memory.facts.length > 20) req.user.memory.facts = req.user.memory.facts.slice(-20); }
-  req.user.memory.conversations++;
-  res.json(req.user.memory);
+  try {
+    const result = await pool.query('SELECT memory FROM users WHERE email = $1', [req.userEmail]);
+    const mem = result.rows[0]?.memory || { facts: [], conversations: 0 };
+    if (fact) { mem.facts.push(fact); if (mem.facts.length > 20) mem.facts = mem.facts.slice(-20); }
+    mem.conversations = (mem.conversations || 0) + 1;
+    await pool.query('UPDATE users SET memory = $1 WHERE email = $2', [JSON.stringify(mem), req.userEmail]);
+    res.json(mem);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/user/memory', auth, (req, res) => res.json(req.user.memory));
-app.delete('/user/memory', auth, (req, res) => {
-  req.user.memory = { facts: [], conversations: 0 };
-  res.json({ ok: true });
+
+app.get('/user/memory', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT memory FROM users WHERE email = $1', [req.userEmail]);
+    res.json(result.rows[0]?.memory || { facts: [], conversations: 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/user/memory', auth, async (req, res) => {
+  try {
+    await pool.query('UPDATE users SET memory = $1, chat_history = $2 WHERE email = $3', [JSON.stringify({ facts: [], conversations: 0 }), JSON.stringify([]), req.userEmail]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── STRIPE ──
@@ -121,81 +196,77 @@ app.get('/api/finance', async (req, res) => {
 app.post('/api/predictions/save', async (req, res) => {
   const { symbol, name, signal, price, confidence, reasoning } = req.body;
   if (!symbol || !signal || !price) return res.status(400).json({ error: 'Missing fields' });
-  const pred = {
-    id: predictionId++,
-    symbol, name: name || symbol,
-    signal,
-    price: parseFloat(price),
-    confidence: confidence || 70,
-    reasoning: reasoning || '',
-    date: new Date().toISOString(),
-    dateStr: new Date().toLocaleDateString('fr-FR'),
-    verified7d: false, verified30d: false,
-    priceAfter7d: null, priceAfter30d: null,
-    result7d: null, result30d: null,
-    correct7d: null, correct30d: null
-  };
-  predictions.push(pred);
-  console.log('Prediction saved:', symbol, signal, price);
-  res.json({ ok: true, id: pred.id });
+  try {
+    const dateStr = new Date().toLocaleDateString('fr-FR');
+    const result = await pool.query(
+      'INSERT INTO predictions (symbol, name, signal, price, confidence, reasoning, date_str) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+      [symbol, name||symbol, signal, parseFloat(price), confidence||70, reasoning||'', dateStr]
+    );
+    console.log('Prediction saved:', symbol, signal, price);
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/predictions', (req, res) => {
-  const stats = calculateStats();
-  res.json({ predictions: predictions.slice(-100).reverse(), stats });
+app.get('/api/predictions', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM predictions ORDER BY date DESC LIMIT 100');
+    const preds = result.rows.map(p => ({
+      id: p.id, symbol: p.symbol, name: p.name, signal: p.signal,
+      price: parseFloat(p.price), confidence: p.confidence, reasoning: p.reasoning,
+      dateStr: p.date_str, date: p.date,
+      verified7d: p.verified_7d, verified30d: p.verified_30d,
+      priceAfter7d: p.price_after_7d ? parseFloat(p.price_after_7d) : null,
+      priceAfter30d: p.price_after_30d ? parseFloat(p.price_after_30d) : null,
+      result7d: p.result_7d, result30d: p.result_30d,
+      correct7d: p.correct_7d, correct30d: p.correct_30d
+    }));
+    // Calculate stats
+    const verified = preds.filter(p => p.verified7d);
+    const correct = verified.filter(p => p.correct7d === true);
+    const accuracy = verified.length > 0 ? Math.round((correct.length / verified.length) * 100) : null;
+    const bySignal = { ACHETER:{total:0,correct:0}, VENDRE:{total:0,correct:0}, CONSERVER:{total:0,correct:0} };
+    verified.forEach(p => { if(bySignal[p.signal]){bySignal[p.signal].total++;if(p.correct7d)bySignal[p.signal].correct++;} });
+    res.json({ predictions: preds, stats: { total: preds.length, totalVerified: verified.length, accuracy, bySignal } });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-function calculateStats() {
-  const verified = predictions.filter(p => p.verified7d);
-  const correct = verified.filter(p => p.correct7d === true);
-  const accuracy = verified.length > 0 ? Math.round((correct.length / verified.length) * 100) : null;
-  const bySignal = { ACHETER: { total: 0, correct: 0 }, VENDRE: { total: 0, correct: 0 }, CONSERVER: { total: 0, correct: 0 } };
-  verified.forEach(p => {
-    if (bySignal[p.signal]) { bySignal[p.signal].total++; if (p.correct7d) bySignal[p.signal].correct++; }
-  });
-  return { total: predictions.length, totalVerified: verified.length, accuracy, bySignal };
-}
 
 async function verifyPredictions() {
-  const now = new Date();
-  for (const pred of predictions) {
-    const predDate = new Date(pred.date);
-    const daysDiff = (now - predDate) / (1000 * 60 * 60 * 24);
-    if (!pred.verified7d && daysDiff >= 7) {
-      try {
-        const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + pred.symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const d = await r.json();
-        const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (currentPrice) {
-          const priceDiff = ((currentPrice - pred.price) / pred.price) * 100;
-          pred.priceAfter7d = currentPrice;
-          pred.verified7d = true;
-          if (pred.signal === 'ACHETER') pred.correct7d = priceDiff > 1;
-          else if (pred.signal === 'VENDRE') pred.correct7d = priceDiff < -1;
-          else pred.correct7d = Math.abs(priceDiff) < 3;
-          pred.result7d = priceDiff.toFixed(2);
-        }
-      } catch(e) {}
-      await new Promise(r => setTimeout(r, 1000));
+  try {
+    const now = new Date();
+    const result = await pool.query('SELECT * FROM predictions WHERE (verified_7d = FALSE OR verified_30d = FALSE)');
+    for (const pred of result.rows) {
+      const predDate = new Date(pred.date);
+      const daysDiff = (now - predDate) / (1000 * 60 * 60 * 24);
+      if (!pred.verified_7d && daysDiff >= 7) {
+        try {
+          const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + pred.symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+          const d = await r.json();
+          const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+          if (currentPrice) {
+            const priceDiff = ((currentPrice - pred.price) / pred.price) * 100;
+            const correct = pred.signal === 'ACHETER' ? priceDiff > 1 : pred.signal === 'VENDRE' ? priceDiff < -1 : Math.abs(priceDiff) < 3;
+            await pool.query('UPDATE predictions SET verified_7d=TRUE, price_after_7d=$1, result_7d=$2, correct_7d=$3 WHERE id=$4', [currentPrice, priceDiff.toFixed(2), correct, pred.id]);
+            console.log('Verified 7d:', pred.symbol, pred.signal, correct, priceDiff.toFixed(2)+'%');
+          }
+        } catch(e) {}
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      if (!pred.verified_30d && daysDiff >= 30) {
+        try {
+          const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + pred.symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+          const d = await r.json();
+          const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+          if (currentPrice) {
+            const priceDiff = ((currentPrice - pred.price) / pred.price) * 100;
+            const correct = pred.signal === 'ACHETER' ? priceDiff > 2 : pred.signal === 'VENDRE' ? priceDiff < -2 : Math.abs(priceDiff) < 5;
+            await pool.query('UPDATE predictions SET verified_30d=TRUE, price_after_30d=$1, result_30d=$2, correct_30d=$3 WHERE id=$4', [currentPrice, priceDiff.toFixed(2), correct, pred.id]);
+          }
+        } catch(e) {}
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
-    if (!pred.verified30d && daysDiff >= 30) {
-      try {
-        const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + pred.symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const d = await r.json();
-        const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (currentPrice) {
-          const priceDiff = ((currentPrice - pred.price) / pred.price) * 100;
-          pred.priceAfter30d = currentPrice;
-          pred.verified30d = true;
-          if (pred.signal === 'ACHETER') pred.correct30d = priceDiff > 2;
-          else if (pred.signal === 'VENDRE') pred.correct30d = priceDiff < -2;
-          else pred.correct30d = Math.abs(priceDiff) < 5;
-          pred.result30d = priceDiff.toFixed(2);
-        }
-      } catch(e) {}
-      await new Promise(r => setTimeout(r, 1000));
-    }
-  }
+    console.log('Predictions verified');
+  } catch(e) { console.log('verifyPredictions error:', e.message); }
 }
 
 // ── CANVAS CHARTS ──
