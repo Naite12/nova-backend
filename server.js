@@ -48,6 +48,22 @@ async function initDB() {
         correct_30d BOOLEAN
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS analyses (
+        id SERIAL PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        name TEXT,
+        price DECIMAL,
+        change_pct DECIMAL,
+        signal TEXT,
+        confidence INTEGER,
+        full_analysis TEXT,
+        market_data JSONB,
+        date TIMESTAMP DEFAULT NOW(),
+        date_str TEXT,
+        user_email TEXT
+      )
+    `);
     console.log('Database initialized');
   } catch(e) {
     console.log('DB init error:', e.message);
@@ -232,6 +248,32 @@ app.get('/api/finance', async (req, res) => {
 });
 
 // ── PREDICTIONS ──
+// ── ANALYSES ARCHIVE ──
+app.post('/api/analyses/save', async (req, res) => {
+  const { symbol, name, price, change_pct, signal, confidence, full_analysis, market_data, user_email } = req.body;
+  if (!symbol || !full_analysis) return res.status(400).json({ error: 'Missing fields' });
+  try {
+    const dateStr = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const result = await pool.query(
+      'INSERT INTO analyses (symbol, name, price, change_pct, signal, confidence, full_analysis, market_data, date_str, user_email) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id',
+      [symbol, name||symbol, price||0, change_pct||0, signal||'', confidence||70, full_analysis, JSON.stringify(market_data||{}), dateStr, user_email||'']
+    );
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/analyses', async (req, res) => {
+  const { symbol, limit } = req.query;
+  try {
+    let query = 'SELECT * FROM analyses';
+    let params = [];
+    if (symbol) { query += ' WHERE symbol = $1'; params.push(symbol); }
+    query += ' ORDER BY date DESC LIMIT ' + (parseInt(limit) || 200);
+    const result = await pool.query(query, params);
+    res.json({ analyses: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/predictions/save', async (req, res) => {
   const { symbol, name, signal, price, confidence, reasoning } = req.body;
   if (!symbol || !signal || !price) return res.status(400).json({ error: 'Missing fields' });
