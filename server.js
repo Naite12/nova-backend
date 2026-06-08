@@ -164,19 +164,58 @@ app.post('/create-subscription', async (req, res) => {
 
 // ── CLAUDE API ──
 app.post('/api/chat', async (req, res) => {
-  const { history, system } = req.body;
+  const { history, system, useWebSearch } = req.body;
   try {
+    const body = {
+      model: 'claude-sonnet-4-5',
+      max_tokens: 1500,
+      system: system || 'You are N.O.V.A., a financial AI assistant.',
+      messages: history
+    };
+    // Enable web search for real-time financial news
+    if (useWebSearch !== false) {
+      body.tools = [{ type: 'web_search_20250305', name: 'web_search' }];
+    }
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1000, system: system || 'You are N.O.V.A., a financial AI assistant.', messages: history })
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'web-search-2025-03-05'
+      },
+      body: JSON.stringify(body)
     });
     const d = await r.json();
+    // Extract text from potentially mixed content blocks
+    if (d.content && Array.isArray(d.content)) {
+      const textBlocks = d.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+      if (textBlocks) d.content = [{ type: 'text', text: textBlocks }];
+    }
     res.json(d);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── FINANCE ──
+// ── FINANCIAL NEWS ──
+app.get('/api/news', async (req, res) => {
+  const { symbol } = req.query;
+  try {
+    const query = symbol ? symbol.replace('-USD','').replace('^','') + ' stock market' : 'financial markets crypto stocks';
+    const r = await fetch(
+      'https://query1.finance.yahoo.com/v1/finance/search?q=' + encodeURIComponent(query) + '&newsCount=5&enableFuzzyQuery=false',
+      { headers: { 'User-Agent': 'Mozilla/5.0' } }
+    );
+    const d = await r.json();
+    const news = (d.news || []).slice(0, 5).map(n => ({
+      title: n.title,
+      time: new Date(n.providerPublishTime * 1000).toLocaleDateString('fr-FR'),
+      publisher: n.publisher
+    }));
+    res.json({ news });
+  } catch(e) { res.json({ news: [] }); }
+});
+
 app.get('/api/finance', async (req, res) => {
   const { symbol } = req.query;
   try {
