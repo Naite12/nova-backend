@@ -48,6 +48,60 @@ async function initDB() {
         correct_30d BOOLEAN
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS watchlists (
+        id SERIAL PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        name TEXT,
+        added_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_email, symbol)
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS alerts (
+        id SERIAL PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        name TEXT,
+        condition TEXT NOT NULL,
+        target_price DECIMAL NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        triggered BOOLEAN DEFAULT FALSE,
+        triggered_at TIMESTAMP,
+        triggered_price DECIMAL
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portfolios (
+        user_email TEXT PRIMARY KEY,
+        initial_capital DECIMAL NOT NULL,
+        cash DECIMAL NOT NULL,
+        risk_profile TEXT DEFAULT 'balanced',
+        active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS positions (
+        id SERIAL PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        name TEXT,
+        quantity DECIMAL NOT NULL,
+        entry_price DECIMAL NOT NULL,
+        entry_date TIMESTAMP DEFAULT NOW(),
+        stop_loss DECIMAL,
+        take_profit DECIMAL,
+        status TEXT DEFAULT 'open',
+        exit_price DECIMAL,
+        exit_date TIMESTAMP,
+        exit_reason TEXT,
+        pnl DECIMAL,
+        pnl_pct DECIMAL,
+        nova_reasoning TEXT
+      )
+    `);
     console.log('Database initialized');
   } catch(e) {
     console.log('DB init error:', e.message);
@@ -514,6 +568,298 @@ app.post('/send-reports', async (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({ status: 'N.O.V.A. Backend Online', version: '3.0' }));
+
+// ── WATCHLIST ──
+app.get('/api/watchlist', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM watchlists WHERE user_email = $1 ORDER BY added_at DESC', [req.userEmail]);
+    res.json({ watchlist: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/watchlist', auth, async (req, res) => {
+  const { symbol, name } = req.body;
+  if (!symbol) return res.status(400).json({ error: 'Symbol required' });
+  try {
+    await pool.query('INSERT INTO watchlists (user_email, symbol, name) VALUES ($1, $2, $3) ON CONFLICT (user_email, symbol) DO NOTHING', [req.userEmail, symbol, name || symbol]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/watchlist/:symbol', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM watchlists WHERE user_email = $1 AND symbol = $2', [req.userEmail, req.params.symbol]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ALERTS ──
+app.get('/api/alerts', auth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM alerts WHERE user_email = $1 ORDER BY created_at DESC', [req.userEmail]);
+    res.json({ alerts: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/alerts', auth, async (req, res) => {
+  const { symbol, name, condition, target_price } = req.body;
+  if (!symbol || !condition || !target_price) return res.status(400).json({ error: 'Missing fields' });
+  if (!['above','below'].includes(condition)) return res.status(400).json({ error: 'Invalid condition' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO alerts (user_email, symbol, name, condition, target_price) VALUES ($1,$2,$3,$4,$5) RETURNING id',
+      [req.userEmail, symbol, name || symbol, condition, parseFloat(target_price)]
+    );
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/alerts/:id', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM alerts WHERE user_email = $1 AND id = $2', [req.userEmail, req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ALERT CHECKER ──
+async function checkAlerts() {
+  try {
+    const result = await pool.query('SELECT * FROM alerts WHERE triggered = FALSE');
+    if (result.rows.length === 0) return;
+    const bySymbol = {};
+    result.rows.forEach(a => {
+      if (!bySymbol[a.symbol]) bySymbol[a.symbol] = [];
+      bySymbol[a.symbol].push(a);
+    });
+    for (const symbol of Object.keys(bySymbol)) {
+      try {
+        const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const d = await r.json();
+        const price = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+        if (!price) continue;
+        for (const alert of bySymbol[symbol]) {
+          const target = parseFloat(alert.target_price);
+          const triggered = (alert.condition === 'above' && price >= target) || (alert.condition === 'below' && price <= target);
+          if (triggered) {
+            await pool.query('UPDATE alerts SET triggered = TRUE, triggered_at = NOW(), triggered_price = $1 WHERE id = $2', [price, alert.id]);
+          }
+        }
+      } catch(e) {}
+      await new Promise(r => setTimeout(r, 500));
+    }
+  } catch(e) { console.log('checkAlerts error:', e.message); }
+}
+setInterval(checkAlerts, 5 * 60 * 1000);
+
+// ── PAPER TRADING PORTFOLIO ──
+app.get('/api/portfolio', auth, async (req, res) => {
+  try {
+    const portfolio = await pool.query('SELECT * FROM portfolios WHERE user_email = $1', [req.userEmail]);
+    if (portfolio.rows.length === 0) return res.json({ portfolio: null, positions: [], history: [] });
+    const open = await pool.query('SELECT * FROM positions WHERE user_email = $1 AND status = $2 ORDER BY entry_date DESC', [req.userEmail, 'open']);
+    const closed = await pool.query('SELECT * FROM positions WHERE user_email = $1 AND status = $2 ORDER BY exit_date DESC LIMIT 50', [req.userEmail, 'closed']);
+    const positionsWithPrices = [];
+    for (const pos of open.rows) {
+      try {
+        const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + pos.symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const d = await r.json();
+        const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
+        if (currentPrice) {
+          const pnl = (currentPrice - parseFloat(pos.entry_price)) * parseFloat(pos.quantity);
+          const pnlPct = ((currentPrice - parseFloat(pos.entry_price)) / parseFloat(pos.entry_price)) * 100;
+          positionsWithPrices.push({ ...pos, current_price: currentPrice, current_pnl: pnl, current_pnl_pct: pnlPct.toFixed(2) });
+        } else { positionsWithPrices.push(pos); }
+      } catch(e) { positionsWithPrices.push(pos); }
+    }
+    const totalPositionsValue = positionsWithPrices.reduce((s, p) => s + (p.current_price ? p.current_price * parseFloat(p.quantity) : parseFloat(p.entry_price) * parseFloat(p.quantity)), 0);
+    const totalValue = parseFloat(portfolio.rows[0].cash) + totalPositionsValue;
+    const totalReturn = ((totalValue - parseFloat(portfolio.rows[0].initial_capital)) / parseFloat(portfolio.rows[0].initial_capital)) * 100;
+    res.json({
+      portfolio: portfolio.rows[0],
+      positions: positionsWithPrices,
+      history: closed.rows,
+      stats: {
+        totalValue: totalValue.toFixed(2),
+        cash: parseFloat(portfolio.rows[0].cash).toFixed(2),
+        positionsValue: totalPositionsValue.toFixed(2),
+        totalReturn: totalReturn.toFixed(2),
+        winRate: closed.rows.length > 0 ? Math.round(closed.rows.filter(p => parseFloat(p.pnl) > 0).length / closed.rows.length * 100) : null,
+        totalTrades: closed.rows.length
+      }
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/portfolio/create', auth, async (req, res) => {
+  const { capital, risk_profile } = req.body;
+  if (!capital || capital < 100) return res.status(400).json({ error: 'Capital minimum 100$' });
+  try {
+    await pool.query('INSERT INTO portfolios (user_email, initial_capital, cash, risk_profile) VALUES ($1, $2, $2, $3) ON CONFLICT (user_email) DO UPDATE SET initial_capital = $2, cash = $2, risk_profile = $3, active = TRUE', [req.userEmail, parseFloat(capital), risk_profile || 'balanced']);
+    await pool.query('DELETE FROM positions WHERE user_email = $1', [req.userEmail]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/portfolio/toggle', auth, async (req, res) => {
+  try {
+    await pool.query('UPDATE portfolios SET active = NOT active WHERE user_email = $1', [req.userEmail]);
+    const r = await pool.query('SELECT active FROM portfolios WHERE user_email = $1', [req.userEmail]);
+    res.json({ active: r.rows[0]?.active });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/portfolio', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM positions WHERE user_email = $1', [req.userEmail]);
+    await pool.query('DELETE FROM portfolios WHERE user_email = $1', [req.userEmail]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── AUTONOMOUS TRADER ──
+const TRADING_UNIVERSE = [
+  'BTC-USD','ETH-USD','SOL-USD','BNB-USD','XRP-USD','ADA-USD','AVAX-USD','DOT-USD','LINK-USD','MATIC-USD',
+  'SPY','QQQ','DIA','IWM','VTI','VOO','GLD','SLV','XLK','XLF','XLE','XLV','SOXX','ARKK',
+  'AAPL','MSFT','NVDA','GOOGL','META','AMZN','TSLA','AMD','NFLX','COIN','JPM','V','MA','DIS','BA','UBER','PYPL'
+];
+const RISK_PROFILES = {
+  conservative: { positionSize: 0.05, stopLoss: 0.05, takeProfit: 0.08, minConfidence: 80, maxPositions: 5 },
+  balanced: { positionSize: 0.10, stopLoss: 0.08, takeProfit: 0.15, minConfidence: 70, maxPositions: 8 },
+  aggressive: { positionSize: 0.15, stopLoss: 0.12, takeProfit: 0.25, minConfidence: 60, maxPositions: 12 }
+};
+
+async function getPriceForSymbol(symbol) {
+  try {
+    const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=5d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const d = await r.json();
+    const meta = d?.chart?.result?.[0]?.meta;
+    if (!meta?.regularMarketPrice) return null;
+    const prices = d?.chart?.result?.[0]?.indicators?.quote?.[0]?.close || [];
+    const validPrices = prices.filter(p => p !== null);
+    return {
+      price: meta.regularMarketPrice,
+      change: validPrices.length >= 2 ? ((meta.regularMarketPrice - validPrices[0]) / validPrices[0] * 100) : 0,
+      name: meta.symbol || symbol
+    };
+  } catch(e) { return null; }
+}
+
+function novaAnalyzeForTrade(symbol, price, change) {
+  let score = 50;
+  let signal = 'HOLD';
+  let reasoning = '';
+  if (change > 3) { score += 20; signal = 'BUY'; reasoning = 'Forte dynamique haussiere (' + change.toFixed(2) + '%). '; }
+  else if (change > 1) { score += 10; signal = 'BUY'; reasoning = 'Tendance positive (' + change.toFixed(2) + '%). '; }
+  else if (change < -3) { score += 15; signal = 'BUY'; reasoning = 'Survente potentielle (' + change.toFixed(2) + '%), opportunite de rebond. '; }
+  else if (change < -1) { score -= 5; signal = 'HOLD'; reasoning = 'Faiblesse moderee. '; }
+  else { score -= 5; signal = 'HOLD'; reasoning = 'Marche stable. '; }
+  score += Math.floor(Math.random() * 20) - 10;
+  score = Math.min(95, Math.max(40, score));
+  return { signal, confidence: score, reasoning };
+}
+
+async function runAutonomousTrader() {
+  try {
+    console.log('N.O.V.A. autonomous trader running...');
+    const portfolios = await pool.query('SELECT * FROM portfolios WHERE active = TRUE');
+    if (portfolios.rows.length === 0) return;
+    const pricesCache = {};
+    for (const symbol of TRADING_UNIVERSE) {
+      const d = await getPriceForSymbol(symbol);
+      if (d) pricesCache[symbol] = d;
+      await new Promise(r => setTimeout(r, 300));
+    }
+    for (const portfolio of portfolios.rows) {
+      try {
+        const profile = RISK_PROFILES[portfolio.risk_profile] || RISK_PROFILES.balanced;
+        const openPositions = await pool.query('SELECT * FROM positions WHERE user_email = $1 AND status = $2', [portfolio.user_email, 'open']);
+        for (const pos of openPositions.rows) {
+          const priceData = pricesCache[pos.symbol];
+          if (!priceData) continue;
+          const currentPrice = priceData.price;
+          const entryPrice = parseFloat(pos.entry_price);
+          let shouldClose = false;
+          let reason = '';
+          if (pos.take_profit && currentPrice >= parseFloat(pos.take_profit)) { shouldClose = true; reason = 'Take Profit atteint'; }
+          else if (pos.stop_loss && currentPrice <= parseFloat(pos.stop_loss)) { shouldClose = true; reason = 'Stop Loss declenche'; }
+          if (shouldClose) {
+            const pnl = (currentPrice - entryPrice) * parseFloat(pos.quantity);
+            const pnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+            const proceeds = currentPrice * parseFloat(pos.quantity);
+            await pool.query('UPDATE positions SET status = $1, exit_price = $2, exit_date = NOW(), exit_reason = $3, pnl = $4, pnl_pct = $5 WHERE id = $6', ['closed', currentPrice, reason, pnl, pnlPct.toFixed(2), pos.id]);
+            await pool.query('UPDATE portfolios SET cash = cash + $1 WHERE user_email = $2', [proceeds, portfolio.user_email]);
+          }
+        }
+        const portfolioUpdated = await pool.query('SELECT * FROM portfolios WHERE user_email = $1', [portfolio.user_email]);
+        const updatedCash = parseFloat(portfolioUpdated.rows[0].cash);
+        const stillOpen = await pool.query('SELECT * FROM positions WHERE user_email = $1 AND status = $2', [portfolio.user_email, 'open']);
+        if (stillOpen.rows.length >= profile.maxPositions) continue;
+        const heldSymbols = stillOpen.rows.map(p => p.symbol);
+        const opportunities = [];
+        for (const symbol of TRADING_UNIVERSE) {
+          if (heldSymbols.includes(symbol)) continue;
+          if (!pricesCache[symbol]) continue;
+          const analysis = novaAnalyzeForTrade(symbol, pricesCache[symbol].price, pricesCache[symbol].change);
+          if (analysis.signal === 'BUY' && analysis.confidence >= profile.minConfidence) {
+            opportunities.push({ symbol, ...analysis, ...pricesCache[symbol] });
+          }
+        }
+        opportunities.sort((a, b) => b.confidence - a.confidence);
+        const slots = profile.maxPositions - stillOpen.rows.length;
+        const toBuy = opportunities.slice(0, Math.min(slots, 3));
+        for (const opp of toBuy) {
+          const positionValue = parseFloat(portfolioUpdated.rows[0].initial_capital) * profile.positionSize;
+          if (positionValue > updatedCash) continue;
+          const quantity = positionValue / opp.price;
+          const stopLoss = opp.price * (1 - profile.stopLoss);
+          const takeProfit = opp.price * (1 + profile.takeProfit);
+          await pool.query('INSERT INTO positions (user_email, symbol, name, quantity, entry_price, stop_loss, take_profit, nova_reasoning) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [portfolio.user_email, opp.symbol, opp.name, quantity, opp.price, stopLoss, takeProfit, opp.reasoning + 'Confiance: ' + opp.confidence + '%']);
+          await pool.query('UPDATE portfolios SET cash = cash - $1 WHERE user_email = $2', [positionValue, portfolio.user_email]);
+        }
+      } catch(e) { console.log('Portfolio error:', e.message); }
+    }
+  } catch(e) { console.log('Trader error:', e.message); }
+}
+
+const traderHours = [8, 14, 20];
+function scheduleTrader() {
+  const now = new Date();
+  const parisHour = parseInt(now.toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: '2-digit', hour12: false }));
+  const parisMin = parseInt(now.toLocaleString('en-US', { timeZone: 'Europe/Paris', minute: '2-digit' }));
+  for (const h of traderHours) {
+    if (parisHour === h && parisMin < 5) { runAutonomousTrader(); break; }
+  }
+}
+setInterval(scheduleTrader, 60 * 1000);
+
+app.post('/api/trader/run', async (req, res) => {
+  const { secret } = req.body;
+  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+  runAutonomousTrader();
+  res.json({ ok: true });
+});
+
+// ── ANALYSES ──
+app.post('/api/analyses/save', async (req, res) => {
+  const { symbol, name, price, change_pct, signal, confidence, full_analysis, market_data, user_email } = req.body;
+  if (!symbol) return res.status(400).json({ error: 'Symbol required' });
+  try {
+    const date_str = new Date().toLocaleDateString('fr-FR');
+    const result = await pool.query(
+      'INSERT INTO analyses (symbol, name, price, change_pct, signal, confidence, full_analysis, market_data, date_str, user_email) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id',
+      [symbol, name, price, change_pct, signal, confidence, full_analysis, market_data || {}, date_str, user_email]
+    );
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/analyses', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+  try {
+    const result = await pool.query('SELECT * FROM analyses ORDER BY date DESC LIMIT $1', [limit]);
+    res.json({ analyses: result.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log('N.O.V.A. Backend v3.0 running on port ' + PORT));
