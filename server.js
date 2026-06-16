@@ -323,6 +323,15 @@ app.get('/api/predictions', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Asset-class-aware thresholds — crypto is naturally more volatile than stocks/ETFs/forex
+function getThresholds(symbol) {
+  const isCrypto = /-(USD|EUR|GBP)$/.test(symbol) && /^(BTC|ETH|SOL|BNB|XRP|ADA|AVAX|DOT|LINK|MATIC|DOGE)/.test(symbol);
+  const isForex = /^(EUR|GBP|USD|JPY)(USD|EUR|GBP|JPY)?=?X?$/.test(symbol) || symbol.includes('/');
+  if (isCrypto) return { buy7: 3, sell7: -3, hold7: 8, buy30: 6, sell30: -6, hold30: 15 };
+  if (isForex) return { buy7: 0.5, sell7: -0.5, hold7: 2, buy30: 1, sell30: -1, hold30: 3 };
+  return { buy7: 1, sell7: -1, hold7: 3, buy30: 2, sell30: -2, hold30: 5 }; // stocks/ETFs
+}
+
 async function verifyPredictions() {
   try {
     const now = new Date();
@@ -330,6 +339,7 @@ async function verifyPredictions() {
     for (const pred of result.rows) {
       const predDate = new Date(pred.date);
       const daysDiff = (now - predDate) / (1000 * 60 * 60 * 24);
+      const th = getThresholds(pred.symbol);
       if (!pred.verified_7d && daysDiff >= 7) {
         try {
           const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + pred.symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -337,9 +347,9 @@ async function verifyPredictions() {
           const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
           if (currentPrice) {
             const priceDiff = ((currentPrice - pred.price) / pred.price) * 100;
-            const correct = pred.signal === 'ACHETER' ? priceDiff > 1 : pred.signal === 'VENDRE' ? priceDiff < -1 : Math.abs(priceDiff) < 3;
+            const correct = pred.signal === 'ACHETER' ? priceDiff > th.buy7 : pred.signal === 'VENDRE' ? priceDiff < th.sell7 : Math.abs(priceDiff) < th.hold7;
             await pool.query('UPDATE predictions SET verified_7d=TRUE, price_after_7d=$1, result_7d=$2, correct_7d=$3 WHERE id=$4', [currentPrice, priceDiff.toFixed(2), correct, pred.id]);
-            console.log('Verified 7d:', pred.symbol, pred.signal, correct, priceDiff.toFixed(2)+'%');
+            console.log('Verified 7d:', pred.symbol, pred.signal, correct, priceDiff.toFixed(2)+'%', 'threshold:', JSON.stringify(th));
           }
         } catch(e) {}
         await new Promise(r => setTimeout(r, 1000));
@@ -351,7 +361,7 @@ async function verifyPredictions() {
           const currentPrice = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
           if (currentPrice) {
             const priceDiff = ((currentPrice - pred.price) / pred.price) * 100;
-            const correct = pred.signal === 'ACHETER' ? priceDiff > 2 : pred.signal === 'VENDRE' ? priceDiff < -2 : Math.abs(priceDiff) < 5;
+            const correct = pred.signal === 'ACHETER' ? priceDiff > th.buy30 : pred.signal === 'VENDRE' ? priceDiff < th.sell30 : Math.abs(priceDiff) < th.hold30;
             await pool.query('UPDATE predictions SET verified_30d=TRUE, price_after_30d=$1, result_30d=$2, correct_30d=$3 WHERE id=$4', [currentPrice, priceDiff.toFixed(2), correct, pred.id]);
           }
         } catch(e) {}
@@ -559,6 +569,36 @@ function scheduleDaily() {
   console.log('Scheduler started (7h30 Paris)');
 }
 scheduleDaily();
+
+// Re-verify already verified predictions with corrected asset-class thresholds
+app.post('/api/predictions/reverify', async (req, res) => {
+  const { secret } = req.body;
+  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const result = await pool.query('SELECT * FROM predictions WHERE verified_7d = TRUE');
+    let updated = 0;
+    for (const pred of result.rows) {
+      const th = getThresholds(pred.symbol);
+      const priceDiff = parseFloat(pred.result_7d);
+      const correct = pred.signal === 'ACHETER' ? priceDiff > th.buy7 : pred.signal === 'VENDRE' ? priceDiff < th.sell7 : Math.abs(priceDiff) < th.hold7;
+      if (correct !== pred.correct_7d) {
+        await pool.query('UPDATE predictions SET correct_7d=$1 WHERE id=$2', [correct, pred.id]);
+        updated++;
+      }
+    }
+    const result30 = await pool.query('SELECT * FROM predictions WHERE verified_30d = TRUE');
+    for (const pred of result30.rows) {
+      const th = getThresholds(pred.symbol);
+      const priceDiff = parseFloat(pred.result_30d);
+      const correct = pred.signal === 'ACHETER' ? priceDiff > th.buy30 : pred.signal === 'VENDRE' ? priceDiff < th.sell30 : Math.abs(priceDiff) < th.hold30;
+      if (correct !== pred.correct_30d) {
+        await pool.query('UPDATE predictions SET correct_30d=$1 WHERE id=$2', [correct, pred.id]);
+        updated++;
+      }
+    }
+    res.json({ ok: true, updated, total: result.rows.length + result30.rows.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 app.post('/send-reports', async (req, res) => {
   const { secret } = req.body;
