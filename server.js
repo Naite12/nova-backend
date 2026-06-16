@@ -798,6 +798,68 @@ function novaAnalyzeForTrade(symbol, price, change) {
   return { signal, confidence: score, reasoning };
 }
 
+// ── AUTO PREDICTIONS — N.O.V.A. analyzes the full universe every 4h to feed public stats ──
+function novaGenerateSignal(symbol, price, change) {
+  // Reuse the same scoring logic, but output ACHETER/VENDRE/CONSERVER (French, matches DB convention)
+  let score = 50;
+  let signal = 'CONSERVER';
+  let reasoning = '';
+  if (change > 3) { score += 22; signal = 'ACHETER'; reasoning = 'Forte dynamique haussiere detectee (' + change.toFixed(2) + '% sur la periode). Le momentum favorise une entree.'; }
+  else if (change > 1.2) { score += 12; signal = 'ACHETER'; reasoning = 'Tendance positive confirmee (' + change.toFixed(2) + '%). Configuration favorable.'; }
+  else if (change < -4) { score += 16; signal = 'ACHETER'; reasoning = 'Niveau de survente marque (' + change.toFixed(2) + '%), opportunite de rebond technique.'; }
+  else if (change < -2.5) { score += 8; signal = 'VENDRE'; reasoning = 'Pression vendeuse significative (' + change.toFixed(2) + '%). Prudence recommandee.'; }
+  else if (change < -1) { score -= 2; signal = 'CONSERVER'; reasoning = 'Legere faiblesse (' + change.toFixed(2) + '%), pas de signal directionnel clair.'; }
+  else { score -= 4; signal = 'CONSERVER'; reasoning = 'Marche stable, aucune dynamique forte detectee actuellement.'; }
+  score += Math.floor(Math.random() * 16) - 8;
+  score = Math.min(94, Math.max(42, score));
+  return { signal, confidence: score, reasoning };
+}
+
+async function runAutoPredictions() {
+  try {
+    console.log('N.O.V.A. auto-predictions running on full universe...');
+    let saved = 0;
+    for (const symbol of TRADING_UNIVERSE) {
+      try {
+        const d = await getPriceForSymbol(symbol);
+        if (!d) { await new Promise(r => setTimeout(r, 250)); continue; }
+        const analysis = novaGenerateSignal(symbol, d.price, d.change);
+        const dateStr = new Date().toLocaleDateString('fr-FR');
+        await pool.query(
+          'INSERT INTO predictions (symbol, name, signal, price, confidence, reasoning, date_str) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [symbol, d.name || symbol, analysis.signal, d.price, analysis.confidence, analysis.reasoning, dateStr]
+        );
+        saved++;
+      } catch(e) { console.log('Auto-prediction error for', symbol, e.message); }
+      await new Promise(r => setTimeout(r, 350));
+    }
+    console.log('Auto-predictions done:', saved, 'signals saved');
+  } catch(e) { console.log('runAutoPredictions error:', e.message); }
+}
+
+// Run every 4 hours, aligned with autonomous trader logic
+let lastAutoPredictionHour = -1;
+function scheduleAutoPredictions() {
+  const now = new Date();
+  const parisHour = parseInt(now.toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: '2-digit', hour12: false }));
+  const parisMin = parseInt(now.toLocaleString('en-US', { timeZone: 'Europe/Paris', minute: '2-digit' }));
+  // Trigger at 0, 4, 8, 12, 16, 20h Paris time, once per hour window
+  if (parisHour % 4 === 0 && parisMin < 5 && lastAutoPredictionHour !== parisHour) {
+    lastAutoPredictionHour = parisHour;
+    runAutoPredictions();
+  }
+}
+setInterval(scheduleAutoPredictions, 60 * 1000);
+console.log('Auto-predictions scheduled every 4h (0h, 4h, 8h, 12h, 16h, 20h Paris time)');
+
+// Manual trigger for testing
+app.post('/api/predictions/auto-run', async (req, res) => {
+  const { secret } = req.body;
+  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+  runAutoPredictions();
+  res.json({ ok: true, message: 'Auto-predictions started, this will take a few minutes' });
+});
+
 async function runAutonomousTrader() {
   try {
     console.log('N.O.V.A. autonomous trader running...');
