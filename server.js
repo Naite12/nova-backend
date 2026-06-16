@@ -208,10 +208,25 @@ app.delete('/user/memory', auth, async (req, res) => {
 
 // ── STRIPE ──
 app.post('/create-subscription', async (req, res) => {
-  const { paymentMethodId, priceId, email } = req.body;
+  const { paymentMethodId, priceId, email, promoCode } = req.body;
   try {
     const customer = await stripe.customers.create({ email: email || 'subscriber@nova-ai.com', payment_method: paymentMethodId, invoice_settings: { default_payment_method: paymentMethodId } });
-    const subscription = await stripe.subscriptions.create({ customer: customer.id, items: [{ price: priceId }], payment_settings: { payment_method_types: ['card'], save_default_payment_method: 'on_subscription' }, expand: ['latest_invoice.payment_intent'] });
+    const subData = { customer: customer.id, items: [{ price: priceId }], payment_settings: { payment_method_types: ['card'], save_default_payment_method: 'on_subscription' }, expand: ['latest_invoice.payment_intent'] };
+    
+    if (promoCode) {
+      try {
+        const promos = await stripe.promotionCodes.list({ code: promoCode, active: true, limit: 1 });
+        if (promos.data.length > 0) {
+          subData.discounts = [{ promotion_code: promos.data[0].id }];
+        } else {
+          return res.status(400).json({ error: 'Code promo invalide ou expire' });
+        }
+      } catch(promoErr) {
+        return res.status(400).json({ error: 'Code promo invalide' });
+      }
+    }
+    
+    const subscription = await stripe.subscriptions.create(subData);
     res.json({ subscriptionId: subscription.id, clientSecret: subscription.latest_invoice.payment_intent?.client_secret, status: subscription.status });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
