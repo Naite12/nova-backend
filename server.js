@@ -829,6 +829,18 @@ async function runAutoPredictions() {
           'INSERT INTO predictions (symbol, name, signal, price, confidence, reasoning, date_str) VALUES ($1,$2,$3,$4,$5,$6,$7)',
           [symbol, d.name || symbol, analysis.signal, d.price, analysis.confidence, analysis.reasoning, dateStr]
         );
+        // Also log into analyses table so it shows up in Archives
+        const fullText = 'Analyse automatique N.O.V.A. — ' + dateStr + '\\n\\n' +
+          'Actif: ' + (d.name || symbol) + ' (' + symbol + ')\\n' +
+          'Prix actuel: $' + d.price.toFixed(2) + '\\n' +
+          'Variation: ' + (d.change >= 0 ? '+' : '') + d.change.toFixed(2) + '%\\n\\n' +
+          'Signal: ' + analysis.signal + ' (confiance: ' + analysis.confidence + '%)\\n\\n' +
+          analysis.reasoning + '\\n\\n' +
+          'Cette analyse a ete generee automatiquement par mon module de surveillance continue, qui scanne l ensemble de mon univers de ' + TRADING_UNIVERSE.length + ' actifs toutes les 4 heures.';
+        await pool.query(
+          'INSERT INTO analyses (symbol, name, price, change_pct, signal, confidence, full_analysis, market_data, date_str, user_email) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+          [symbol, d.name || symbol, d.price, d.change.toFixed(2), analysis.signal, analysis.confidence, fullText, { auto: true, change: d.change }, dateStr, 'nova-auto']
+        );
         saved++;
       } catch(e) { console.log('Auto-prediction error for', symbol, e.message); }
       await new Promise(r => setTimeout(r, 350));
