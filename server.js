@@ -222,7 +222,7 @@ app.post('/api/chat', async (req, res) => {
   try {
     const body = {
       model: 'claude-sonnet-4-5',
-      max_tokens: 1500,
+      max_tokens: 700,
       system: system || 'You are N.O.V.A., a financial AI assistant.',
       messages: history
     };
