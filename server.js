@@ -986,7 +986,20 @@ app.get('/api/analyses', async (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   try {
     const result = await pool.query('SELECT * FROM analyses ORDER BY date DESC LIMIT $1', [limit]);
-    res.json({ analyses: result.rows });
+    // Global stats over the entire table (not just the limited page)
+    const totalRes = await pool.query('SELECT COUNT(*) AS total, COUNT(DISTINCT symbol) AS unique_symbols FROM analyses');
+    const today = new Date().toLocaleDateString('fr-FR');
+    const todayRes = await pool.query('SELECT COUNT(*) AS today FROM analyses WHERE date_str = $1', [today]);
+    const dominantRes = await pool.query('SELECT signal, COUNT(*) AS c FROM analyses GROUP BY signal ORDER BY c DESC LIMIT 1');
+    res.json({
+      analyses: result.rows,
+      stats: {
+        total: parseInt(totalRes.rows[0].total),
+        uniqueSymbols: parseInt(totalRes.rows[0].unique_symbols),
+        today: parseInt(todayRes.rows[0].today),
+        dominant: dominantRes.rows[0] ? dominantRes.rows[0].signal : '--'
+      }
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
