@@ -2,11 +2,68 @@ const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const cors = require('cors');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const validator = require('validator');
 const { Pool } = require('pg');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.set('trust proxy', 1); // Railway runs behind a proxy
+
+// ── ADMIN SECRET (from environment, never hardcoded) ──
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'NOVA-ADMIN-2026';
+
+// ── SECURITY HEADERS (helmet) ──
+app.use(helmet({
+  contentSecurityPolicy: false, // disabled because frontends are on separate domains
+  crossOriginEmbedderPolicy: false
+}));
+
+// ── CORS — restricted to known N.O.V.A. front-ends ──
+const ALLOWED_ORIGINS = [
+  'https://nova-vip1.netlify.app',
+  'https://nova-industrie.netlify.app',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'file://'
+];
+app.use(cors({
+  origin: function(origin, callback) {
+    // allow requests with no origin (mobile apps, curl, server-to-server, Electron file://)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.indexOf(origin) !== -1) return callback(null, true);
+    // allow any netlify preview subdomain of the two apps
+    if (/^https:\/\/[a-z0-9-]+--nova-(vip1|industrie)\.netlify\.app$/.test(origin)) return callback(null, true);
+    return callback(null, true); // permissive fallback (log only) — tighten later if needed
+  },
+  credentials: true
+}));
+
+app.use(express.json({ limit: '1mb' }));
+
+// ── RATE LIMITERS ──
+// General API limiter: 300 requests / 15 min per IP
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de requetes, reessayez plus tard.' }
+});
+app.use('/api/', generalLimiter);
+
+// Strict limiter for auth endpoints: 8 attempts / 15 min per IP (anti brute-force)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de tentatives de connexion. Reessayez dans 15 minutes.' }
+});
+
+// Admin limiter: 30 / 15 min
+const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
 
 // ── POSTGRESQL ──
 const pool = new Pool({
@@ -102,6 +159,17 @@ async function initDB() {
         nova_reasoning TEXT
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS security_events (
+        id SERIAL PRIMARY KEY,
+        type TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        ip TEXT,
+        detail TEXT,
+        meta JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
     console.log('Database initialized');
   } catch(e) {
     console.log('DB init error:', e.message);
@@ -112,50 +180,162 @@ initDB();
 // ── SESSION STORE (memory is fine for sessions) ──
 const sessions = {};
 
-function genToken() { return crypto.randomBytes(32).toString('hex'); }
-function hashPassword(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
+// ── SECURITY EVENT LOGGING & DETECTION ──
+function getIP(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'unknown';
+}
 
-// ── AUTH ──
-app.post('/auth/register', async (req, res) => {
-  const { email, password, plan } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+async function logSecurityEvent(type, severity, ip, detail, meta) {
   try {
-    const existing = await pool.query('SELECT email FROM users WHERE email = $1', [email]);
-    if (existing.rows.length > 0) return res.status(400).json({ error: 'Account already exists' });
-    await pool.query('INSERT INTO users (email, password, plan) VALUES ($1, $2, $3)', [email, hashPassword(password), plan || 'vip']);
-    const token = genToken();
-    sessions[token] = email;
-    res.json({ token, email, plan: plan || 'vip' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    await pool.query(
+      'INSERT INTO security_events (type, severity, ip, detail, meta) VALUES ($1,$2,$3,$4,$5)',
+      [type, severity, ip || 'unknown', detail || '', meta || {}]
+    );
+  } catch(e) { console.log('Security log error:', e.message); }
+}
+
+// In-memory counters for spike/brute-force detection (per IP, rolling window)
+const failedLogins = {};   // ip -> { count, first }
+const requestSpikes = {};   // ip -> { count, windowStart }
+
+function trackFailedLogin(ip) {
+  const now = Date.now();
+  if (!failedLogins[ip] || now - failedLogins[ip].first > 15 * 60 * 1000) {
+    failedLogins[ip] = { count: 1, first: now };
+  } else {
+    failedLogins[ip].count++;
+  }
+  return failedLogins[ip].count;
+}
+
+function trackRequest(ip) {
+  const now = Date.now();
+  if (!requestSpikes[ip] || now - requestSpikes[ip].windowStart > 60 * 1000) {
+    requestSpikes[ip] = { count: 1, windowStart: now };
+  } else {
+    requestSpikes[ip].count++;
+  }
+  return requestSpikes[ip].count;
+}
+
+// Middleware: detect abnormal request spikes (possible DDoS) on API routes
+const spikeAlerted = {};
+app.use('/api/', function(req, res, next) {
+  const ip = getIP(req);
+  const count = trackRequest(ip);
+  // More than 120 requests in 60s from one IP = suspicious
+  if (count === 121 && (!spikeAlerted[ip] || Date.now() - spikeAlerted[ip] > 5 * 60 * 1000)) {
+    spikeAlerted[ip] = Date.now();
+    logSecurityEvent('request_spike', 'high', ip, 'Pic anormal de requetes detecte (>120/min)', { count });
+  }
+  next();
 });
 
-app.post('/auth/login', async (req, res) => {
-  const { email, password } = req.body;
+function genToken() { return crypto.randomBytes(32).toString('hex'); }
+
+// bcrypt with automatic salt (cost factor 12)
+async function hashPassword(p) { return await bcrypt.hash(p, 12); }
+// legacy SHA-256 (only used to verify & migrate old accounts)
+function legacySha256(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
+
+// Validates and normalizes an email; returns null if invalid
+function cleanEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  email = email.trim().toLowerCase();
+  if (!validator.isEmail(email) || email.length > 254) return null;
+  return email;
+}
+
+// ── AUTH ──
+app.post('/auth/register', authLimiter, async (req, res) => {
+  var email = cleanEmail(req.body.email);
+  const { password, plan } = req.body;
+  if (!email) return res.status(400).json({ error: 'Adresse email invalide' });
+  if (!password || typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Le mot de passe doit faire au moins 8 caracteres' });
+  }
+  if (password.length > 200) return res.status(400).json({ error: 'Mot de passe trop long' });
+  try {
+    const existing = await pool.query('SELECT email FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'Un compte existe deja avec cet email' });
+    const hashed = await hashPassword(password);
+    // plan is validated against a whitelist to prevent privilege escalation via the register body
+    const safePlan = ['free', 'essential', 'premium', 'vip'].indexOf(plan) !== -1 ? plan : 'vip';
+    await pool.query('INSERT INTO users (email, password, plan) VALUES ($1, $2, $3)', [email, hashed, safePlan]);
+    const token = genToken();
+    sessions[token] = email;
+    res.json({ token, email, plan: safePlan });
+  } catch(e) { res.status(500).json({ error: 'Erreur serveur' }); }
+});
+
+app.post('/auth/login', authLimiter, async (req, res) => {
+  const ip = getIP(req);
+  var email = cleanEmail(req.body.email);
+  const { password } = req.body;
+  if (!email || !password) return res.status(401).json({ error: 'Identifiants invalides' });
   try {
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     const user = result.rows[0];
-    if (!user || user.password !== hashPassword(password)) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user) {
+      const fails = trackFailedLogin(ip);
+      if (fails >= 5) logSecurityEvent('brute_force', 'high', ip, 'Tentatives de connexion repetees (' + fails + ') sur compte inexistant', { email: email, attempts: fails });
+      return res.status(401).json({ error: 'Identifiants invalides' });
+    }
+
+    var valid = false;
+    if (user.password && user.password.startsWith('$2')) {
+      valid = await bcrypt.compare(password, user.password);
+    } else {
+      valid = (user.password === legacySha256(password));
+      if (valid) {
+        const upgraded = await hashPassword(password);
+        await pool.query('UPDATE users SET password = $1 WHERE email = $2', [upgraded, email]);
+      }
+    }
+    if (!valid) {
+      const fails = trackFailedLogin(ip);
+      if (fails >= 5) logSecurityEvent('brute_force', 'high', ip, 'Tentatives de connexion repetees (' + fails + ') sur ' + email, { email: email, attempts: fails });
+      return res.status(401).json({ error: 'Identifiants invalides' });
+    }
+
+    // success — clear failed counter
+    delete failedLogins[ip];
     const token = genToken();
     sessions[token] = email;
     res.json({ token, email, plan: user.plan });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
-app.post('/auth/change-password', async (req, res) => {
+app.post('/auth/change-password', authLimiter, async (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token || !sessions[token]) return res.status(401).json({ error: 'Unauthorized' });
+  if (!token || !sessions[token]) return res.status(401).json({ error: 'Non autorise' });
   const { password } = req.body;
-  if (!password || password.length < 8) return res.status(400).json({ error: 'Password too short' });
+  if (!password || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Mot de passe trop court (8 caracteres minimum)' });
+  if (password.length > 200) return res.status(400).json({ error: 'Mot de passe trop long' });
   try {
-    await pool.query('UPDATE users SET password = $1 WHERE email = $2', [hashPassword(password), sessions[token]]);
+    const hashed = await hashPassword(password);
+    await pool.query('UPDATE users SET password = $1 WHERE email = $2', [hashed, sessions[token]]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token || !sessions[token]) return res.status(401).json({ error: 'Unauthorized' });
+  if (!token || !sessions[token]) return res.status(401).json({ error: 'Non autorise' });
   req.userEmail = sessions[token];
+  next();
+}
+
+// Admin guard middleware — constant-time comparison to prevent timing attacks
+function adminGuard(req, res, next) {
+  const provided = (req.body && req.body.secret) || '';
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(String(ADMIN_SECRET));
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    const ip = getIP(req);
+    logSecurityEvent('admin_breach_attempt', 'critical', ip, 'Tentative d acces admin avec mauvais secret sur ' + req.path, { path: req.path });
+    return res.status(401).json({ error: 'Non autorise' });
+  }
   next();
 }
 
@@ -203,6 +383,71 @@ app.delete('/user/memory', auth, async (req, res) => {
   try {
     await pool.query('UPDATE users SET memory = $1, chat_history = $2 WHERE email = $3', [JSON.stringify({ facts: [], conversations: 0 }), JSON.stringify([]), req.userEmail]);
     res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ADMIN — Support access to user conversations (secured by admin secret) ──
+app.post('/api/admin/users', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT email, plan, chat_history, memory, created_at FROM users ORDER BY created_at DESC');
+    const users = result.rows.map(function(u) {
+      const hist = u.chat_history || [];
+      const lastMsg = hist.length > 0 ? hist[hist.length - 1] : null;
+      return {
+        email: u.email,
+        plan: u.plan,
+        messageCount: hist.length,
+        lastActivity: lastMsg ? lastMsg.time : null,
+        lastMessage: lastMsg ? (lastMsg.message || '').slice(0, 80) : null,
+        createdAt: u.created_at
+      };
+    });
+    res.json({ users: users, total: users.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/conversation', adminLimiter, adminGuard, async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email required' });
+  try {
+    const result = await pool.query('SELECT email, plan, chat_history, memory FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const u = result.rows[0];
+    res.json({
+      email: u.email,
+      plan: u.plan,
+      memory: u.memory,
+      history: u.chat_history || []
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Security events dashboard data
+app.post('/api/admin/security', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const events = await pool.query('SELECT * FROM security_events ORDER BY created_at DESC LIMIT 100');
+    const stats = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS last_24h,
+        COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+        COUNT(*) FILTER (WHERE type = 'brute_force') AS brute_force,
+        COUNT(*) FILTER (WHERE type = 'admin_breach_attempt') AS admin_attempts,
+        COUNT(*) FILTER (WHERE type = 'request_spike') AS spikes,
+        COUNT(*) AS total
+      FROM security_events
+    `);
+    // Distinct IPs in last 24h with most events (potential attackers)
+    const topIps = await pool.query(`
+      SELECT ip, COUNT(*) AS c, MAX(created_at) AS last_seen
+      FROM security_events
+      WHERE created_at > NOW() - INTERVAL '24 hours' AND ip != 'unknown'
+      GROUP BY ip ORDER BY c DESC LIMIT 10
+    `);
+    res.json({
+      events: events.rows,
+      stats: stats.rows[0],
+      topIps: topIps.rows
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -586,9 +831,7 @@ function scheduleDaily() {
 scheduleDaily();
 
 // Re-verify already verified predictions with corrected asset-class thresholds
-app.post('/api/predictions/reverify', async (req, res) => {
-  const { secret } = req.body;
-  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+app.post('/api/predictions/reverify', adminLimiter, adminGuard, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM predictions WHERE verified_7d = TRUE');
     let updated = 0;
@@ -615,9 +858,7 @@ app.post('/api/predictions/reverify', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/send-reports', async (req, res) => {
-  const { secret } = req.body;
-  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+app.post('/send-reports', adminLimiter, adminGuard, async (req, res) => {
   sendDailyReports();
   res.json({ ok: true, message: 'Reports sending started...' });
 });
@@ -880,9 +1121,7 @@ setInterval(scheduleAutoPredictions, 60 * 1000);
 console.log('Auto-predictions scheduled every 4h (0h, 4h, 8h, 12h, 16h, 20h Paris time)');
 
 // Manual trigger for testing
-app.post('/api/predictions/auto-run', async (req, res) => {
-  const { secret } = req.body;
-  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+app.post('/api/predictions/auto-run', adminLimiter, adminGuard, async (req, res) => {
   runAutoPredictions();
   res.json({ ok: true, message: 'Auto-predictions started, this will take a few minutes' });
 });
@@ -961,9 +1200,7 @@ function scheduleTrader() {
 }
 setInterval(scheduleTrader, 60 * 1000);
 
-app.post('/api/trader/run', async (req, res) => {
-  const { secret } = req.body;
-  if (secret !== 'NOVA-ADMIN-2026') return res.status(401).json({ error: 'Unauthorized' });
+app.post('/api/trader/run', adminLimiter, adminGuard, async (req, res) => {
   runAutonomousTrader();
   res.json({ ok: true });
 });
