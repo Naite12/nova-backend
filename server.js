@@ -632,6 +632,16 @@ async function verifyPredictions() {
   } catch(e) { console.log('verifyPredictions error:', e.message); }
 }
 
+// Run verification every hour so 7d/30d rates appear as soon as the window is reached
+// (no longer dependent solely on the 7h30 daily report)
+setInterval(function() {
+  verifyPredictions();
+}, 60 * 60 * 1000);
+// Also run once shortly after startup (covers restarts that missed a slot)
+setTimeout(function() {
+  verifyPredictions();
+}, 30 * 1000);
+
 // ── CANVAS CHARTS ──
 const { createCanvas } = require('canvas');
 
@@ -855,6 +865,31 @@ app.post('/api/predictions/reverify', adminLimiter, adminGuard, async (req, res)
       }
     }
     res.json({ ok: true, updated, total: result.rows.length + result30.rows.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Force an immediate verification pass (on-demand, from the control center)
+app.post('/api/predictions/verify-now', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    // Snapshot counts before
+    const before = await pool.query('SELECT COUNT(*) FILTER (WHERE verified_7d=TRUE) AS v7, COUNT(*) FILTER (WHERE verified_30d=TRUE) AS v30 FROM predictions');
+    await verifyPredictions();
+    const after = await pool.query('SELECT COUNT(*) FILTER (WHERE verified_7d=TRUE) AS v7, COUNT(*) FILTER (WHERE verified_30d=TRUE) AS v30 FROM predictions');
+    // How many are eligible but still pending (reached 7 days, not yet verified)
+    const pending = await pool.query(`
+      SELECT COUNT(*) AS c FROM predictions
+      WHERE verified_7d=FALSE AND date <= NOW() - INTERVAL '7 days'
+    `);
+    const newly7d = parseInt(after.rows[0].v7) - parseInt(before.rows[0].v7);
+    const newly30d = parseInt(after.rows[0].v30) - parseInt(before.rows[0].v30);
+    res.json({
+      ok: true,
+      newly_verified_7d: newly7d,
+      newly_verified_30d: newly30d,
+      total_verified_7d: parseInt(after.rows[0].v7),
+      total_verified_30d: parseInt(after.rows[0].v30),
+      still_pending_7d: parseInt(pending.rows[0].c)
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
