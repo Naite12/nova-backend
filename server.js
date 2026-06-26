@@ -406,6 +406,36 @@ app.post('/api/admin/users', adminLimiter, adminGuard, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+app.post('/api/admin/revenue', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT plan, COUNT(*) AS count FROM users
+      WHERE plan IN ('vip','premium','essential') GROUP BY plan
+    `);
+    const prices = { vip: 49, premium: 19, essential: 9 };
+    let mrr = 0;
+    const breakdown = { vip: 0, premium: 0, essential: 0 };
+    result.rows.forEach(function(r) {
+      const c = parseInt(r.count);
+      breakdown[r.plan] = c;
+      mrr += c * (prices[r.plan] || 0);
+    });
+    // Recent paying subscribers (real)
+    const recent = await pool.query(`
+      SELECT email, plan, created_at FROM users
+      WHERE plan IN ('vip','premium','essential')
+      ORDER BY created_at DESC LIMIT 10
+    `);
+    res.json({
+      mrr: mrr,
+      arr: mrr * 12,
+      breakdown: breakdown,
+      prices: prices,
+      recent: recent.rows
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/admin/conversation', adminLimiter, adminGuard, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email required' });
@@ -447,6 +477,82 @@ app.post('/api/admin/security', adminLimiter, adminGuard, async (req, res) => {
       events: events.rows,
       stats: stats.rows[0],
       topIps: topIps.rows
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ADMIN OVERVIEW — all real stats aggregated for the control center ──
+app.post('/api/admin/overview', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    // Users
+    const users = await pool.query(`
+      SELECT COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE plan='vip') AS vip,
+        COUNT(*) FILTER (WHERE plan='premium') AS premium,
+        COUNT(*) FILTER (WHERE plan='essential') AS essential,
+        COUNT(*) FILTER (WHERE plan='free') AS free,
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') AS new_7d
+      FROM users
+    `);
+    // Predictions
+    const preds = await pool.query(`
+      SELECT COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE date::date = NOW()::date) AS today,
+        COUNT(*) FILTER (WHERE verified_7d=TRUE) AS verified_7d,
+        COUNT(*) FILTER (WHERE verified_7d=TRUE AND correct_7d=TRUE) AS correct_7d,
+        COUNT(*) FILTER (WHERE verified_30d=TRUE) AS verified_30d,
+        COUNT(*) FILTER (WHERE verified_30d=TRUE AND correct_30d=TRUE) AS correct_30d,
+        COUNT(DISTINCT symbol) AS symbols
+      FROM predictions
+    `);
+    // Latest predictions (real)
+    const latestPreds = await pool.query(`
+      SELECT symbol, name, signal, price, confidence, reasoning, date
+      FROM predictions ORDER BY date DESC LIMIT 12
+    `);
+    // Portfolios
+    const portfolios = await pool.query(`
+      SELECT COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE active=TRUE) AS active,
+        COALESCE(SUM(initial_capital),0) AS total_capital,
+        COALESCE(SUM(cash),0) AS total_cash
+      FROM portfolios
+    `);
+    // Positions
+    const positions = await pool.query(`
+      SELECT COUNT(*) FILTER (WHERE status='open') AS open,
+        COUNT(*) FILTER (WHERE status='closed') AS closed,
+        COUNT(*) FILTER (WHERE status='closed' AND pnl > 0) AS wins,
+        COUNT(*) FILTER (WHERE status='closed' AND entry_date::date = NOW()::date) AS today,
+        COALESCE(SUM(pnl) FILTER (WHERE status='closed'),0) AS total_pnl
+      FROM positions
+    `);
+    // Recent open positions (real, across all clients)
+    const recentPositions = await pool.query(`
+      SELECT user_email, symbol, name, quantity, entry_price, entry_date, nova_reasoning
+      FROM positions WHERE status='open' ORDER BY entry_date DESC LIMIT 10
+    `);
+    // Watchlists & alerts
+    const watch = await pool.query('SELECT COUNT(*) AS total FROM watchlists');
+    const alerts = await pool.query(`
+      SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE triggered=TRUE) AS triggered FROM alerts
+    `);
+
+    const p = preds.rows[0];
+    const acc7 = parseInt(p.verified_7d) > 0 ? Math.round((parseInt(p.correct_7d)/parseInt(p.verified_7d))*100) : null;
+    const acc30 = parseInt(p.verified_30d) > 0 ? Math.round((parseInt(p.correct_30d)/parseInt(p.verified_30d))*100) : null;
+    const pos = positions.rows[0];
+    const winRate = parseInt(pos.closed) > 0 ? Math.round((parseInt(pos.wins)/parseInt(pos.closed))*100) : null;
+
+    res.json({
+      users: users.rows[0],
+      predictions: { ...p, accuracy_7d: acc7, accuracy_30d: acc30 },
+      latestPredictions: latestPreds.rows,
+      portfolios: portfolios.rows[0],
+      positions: { ...pos, win_rate: winRate },
+      recentPositions: recentPositions.rows,
+      watchlists: watch.rows[0],
+      alerts: alerts.rows[0]
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1107,6 +1213,7 @@ function novaGenerateSignal(symbol, price, change) {
 }
 
 async function runAutoPredictions() {
+  if (typeof SYSTEM_ACTIVE !== 'undefined' && !SYSTEM_ACTIVE) { console.log('Auto-predictions skipped: system halted'); return; }
   try {
     console.log('N.O.V.A. auto-predictions running on full universe...');
     let saved = 0;
@@ -1156,12 +1263,28 @@ setInterval(scheduleAutoPredictions, 60 * 1000);
 console.log('Auto-predictions scheduled every 4h (0h, 4h, 8h, 12h, 16h, 20h Paris time)');
 
 // Manual trigger for testing
+// ── EMERGENCY KILL SWITCH ──
+let SYSTEM_ACTIVE = true;
+
+app.post('/api/admin/emergency-stop', adminLimiter, adminGuard, async (req, res) => {
+  SYSTEM_ACTIVE = !SYSTEM_ACTIVE;
+  console.log('SYSTEM_ACTIVE toggled to:', SYSTEM_ACTIVE);
+  logSecurityEvent('emergency_toggle', SYSTEM_ACTIVE ? 'info' : 'critical', getIP(req),
+    SYSTEM_ACTIVE ? 'Systeme reactive par admin' : 'ARRET D URGENCE active par admin', {});
+  res.json({ ok: true, stopped: !SYSTEM_ACTIVE, systemActive: SYSTEM_ACTIVE });
+});
+
+app.post('/api/admin/system-status', adminLimiter, adminGuard, async (req, res) => {
+  res.json({ systemActive: SYSTEM_ACTIVE });
+});
+
 app.post('/api/predictions/auto-run', adminLimiter, adminGuard, async (req, res) => {
   runAutoPredictions();
   res.json({ ok: true, message: 'Auto-predictions started, this will take a few minutes' });
 });
 
 async function runAutonomousTrader() {
+  if (typeof SYSTEM_ACTIVE !== 'undefined' && !SYSTEM_ACTIVE) { console.log('Autonomous trader skipped: system halted'); return; }
   try {
     console.log('N.O.V.A. autonomous trader running...');
     const portfolios = await pool.query('SELECT * FROM portfolios WHERE active = TRUE');
