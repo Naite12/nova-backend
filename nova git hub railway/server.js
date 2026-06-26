@@ -406,6 +406,36 @@ app.post('/api/admin/users', adminLimiter, adminGuard, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+app.post('/api/admin/revenue', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT plan, COUNT(*) AS count FROM users
+      WHERE plan IN ('vip','premium','essential') GROUP BY plan
+    `);
+    const prices = { vip: 49, premium: 19, essential: 9 };
+    let mrr = 0;
+    const breakdown = { vip: 0, premium: 0, essential: 0 };
+    result.rows.forEach(function(r) {
+      const c = parseInt(r.count);
+      breakdown[r.plan] = c;
+      mrr += c * (prices[r.plan] || 0);
+    });
+    // Recent paying subscribers (real)
+    const recent = await pool.query(`
+      SELECT email, plan, created_at FROM users
+      WHERE plan IN ('vip','premium','essential')
+      ORDER BY created_at DESC LIMIT 10
+    `);
+    res.json({
+      mrr: mrr,
+      arr: mrr * 12,
+      breakdown: breakdown,
+      prices: prices,
+      recent: recent.rows
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/admin/conversation', adminLimiter, adminGuard, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email required' });
