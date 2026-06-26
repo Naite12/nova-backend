@@ -1183,6 +1183,7 @@ function novaGenerateSignal(symbol, price, change) {
 }
 
 async function runAutoPredictions() {
+  if (typeof SYSTEM_ACTIVE !== 'undefined' && !SYSTEM_ACTIVE) { console.log('Auto-predictions skipped: system halted'); return; }
   try {
     console.log('N.O.V.A. auto-predictions running on full universe...');
     let saved = 0;
@@ -1232,12 +1233,28 @@ setInterval(scheduleAutoPredictions, 60 * 1000);
 console.log('Auto-predictions scheduled every 4h (0h, 4h, 8h, 12h, 16h, 20h Paris time)');
 
 // Manual trigger for testing
+// ── EMERGENCY KILL SWITCH ──
+let SYSTEM_ACTIVE = true;
+
+app.post('/api/admin/emergency-stop', adminLimiter, adminGuard, async (req, res) => {
+  SYSTEM_ACTIVE = !SYSTEM_ACTIVE;
+  console.log('SYSTEM_ACTIVE toggled to:', SYSTEM_ACTIVE);
+  logSecurityEvent('emergency_toggle', SYSTEM_ACTIVE ? 'info' : 'critical', getIP(req),
+    SYSTEM_ACTIVE ? 'Systeme reactive par admin' : 'ARRET D URGENCE active par admin', {});
+  res.json({ ok: true, stopped: !SYSTEM_ACTIVE, systemActive: SYSTEM_ACTIVE });
+});
+
+app.post('/api/admin/system-status', adminLimiter, adminGuard, async (req, res) => {
+  res.json({ systemActive: SYSTEM_ACTIVE });
+});
+
 app.post('/api/predictions/auto-run', adminLimiter, adminGuard, async (req, res) => {
   runAutoPredictions();
   res.json({ ok: true, message: 'Auto-predictions started, this will take a few minutes' });
 });
 
 async function runAutonomousTrader() {
+  if (typeof SYSTEM_ACTIVE !== 'undefined' && !SYSTEM_ACTIVE) { console.log('Autonomous trader skipped: system halted'); return; }
   try {
     console.log('N.O.V.A. autonomous trader running...');
     const portfolios = await pool.query('SELECT * FROM portfolios WHERE active = TRUE');
