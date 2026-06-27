@@ -576,6 +576,26 @@ app.post('/api/admin/overview', adminLimiter, adminGuard, async (req, res) => {
       SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE triggered=TRUE) AS triggered FROM alerts
     `);
 
+    // ── PREDICTION LIFECYCLE / COUNTDOWNS ──
+    // Oldest unverified prediction (next to reach its 7d / 30d checkpoint)
+    const lifecycle = await pool.query(`
+      SELECT
+        MIN(date) FILTER (WHERE verified_7d IS NOT TRUE) AS oldest_pending_7d,
+        MIN(date) FILTER (WHERE verified_30d IS NOT TRUE) AS oldest_pending_30d,
+        COUNT(*) FILTER (WHERE verified_7d IS NOT TRUE AND date <= NOW() - INTERVAL '7 days') AS due_7d,
+        COUNT(*) FILTER (WHERE verified_30d IS NOT TRUE AND date <= NOW() - INTERVAL '30 days') AS due_30d,
+        COUNT(*) FILTER (WHERE verified_7d IS NOT TRUE) AS pending_7d,
+        COUNT(*) FILTER (WHERE verified_30d IS NOT TRUE) AS pending_30d,
+        MIN(date) AS first_prediction,
+        MAX(date) AS last_prediction
+      FROM predictions
+    `);
+    const lc = lifecycle.rows[0];
+    // Compute next checkpoint dates from the oldest pending prediction
+    let next7d = null, next30d = null;
+    if (lc.oldest_pending_7d) { next7d = new Date(new Date(lc.oldest_pending_7d).getTime() + 7*24*60*60*1000).toISOString(); }
+    if (lc.oldest_pending_30d) { next30d = new Date(new Date(lc.oldest_pending_30d).getTime() + 30*24*60*60*1000).toISOString(); }
+
     const p = preds.rows[0];
     const acc7 = parseInt(p.verified_7d) > 0 ? Math.round((parseInt(p.correct_7d)/parseInt(p.verified_7d))*100) : null;
     const acc30 = parseInt(p.verified_30d) > 0 ? Math.round((parseInt(p.correct_30d)/parseInt(p.verified_30d))*100) : null;
@@ -590,7 +610,18 @@ app.post('/api/admin/overview', adminLimiter, adminGuard, async (req, res) => {
       positions: { ...pos, win_rate: winRate },
       recentPositions: recentPositions.rows,
       watchlists: watch.rows[0],
-      alerts: alerts.rows[0]
+      alerts: alerts.rows[0],
+      lifecycle: {
+        firstPrediction: lc.first_prediction,
+        lastPrediction: lc.last_prediction,
+        next7dCheckpoint: next7d,
+        next30dCheckpoint: next30d,
+        due7d: parseInt(lc.due_7d),
+        due30d: parseInt(lc.due_30d),
+        pending7d: parseInt(lc.pending_7d),
+        pending30d: parseInt(lc.pending_30d),
+        serverNow: new Date().toISOString()
+      }
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
