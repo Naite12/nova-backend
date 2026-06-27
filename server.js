@@ -668,7 +668,8 @@ app.post('/api/predictions/save', async (req, res) => {
 
 app.get('/api/predictions', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM predictions ORDER BY date DESC LIMIT 100');
+    const limit = parseInt(req.query.limit) || 100;
+    const result = await pool.query('SELECT * FROM predictions ORDER BY date DESC LIMIT $1', [limit]);
     const preds = result.rows.map(p => ({
       id: p.id, symbol: p.symbol, name: p.name, signal: p.signal,
       price: parseFloat(p.price), confidence: p.confidence, reasoning: p.reasoning,
@@ -679,13 +680,17 @@ app.get('/api/predictions', async (req, res) => {
       result7d: p.result_7d, result30d: p.result_30d,
       correct7d: p.correct_7d, correct30d: p.correct_30d
     }));
-    // Calculate stats
-    const verified = preds.filter(p => p.verified7d);
-    const correct = verified.filter(p => p.correct7d === true);
-    const accuracy = verified.length > 0 ? Math.round((correct.length / verified.length) * 100) : null;
+    // GLOBAL stats computed over the ENTIRE table, not just the limited page
+    const totalRes = await pool.query('SELECT COUNT(*) AS total FROM predictions');
+    const verifRes = await pool.query('SELECT COUNT(*) AS verified, COUNT(*) FILTER (WHERE correct_7d = TRUE) AS correct FROM predictions WHERE verified_7d = TRUE');
+    const totalCount = parseInt(totalRes.rows[0].total);
+    const verifiedCount = parseInt(verifRes.rows[0].verified);
+    const correctCount = parseInt(verifRes.rows[0].correct);
+    const accuracy = verifiedCount > 0 ? Math.round((correctCount / verifiedCount) * 100) : null;
+    const bySignalRes = await pool.query("SELECT signal, COUNT(*) FILTER (WHERE verified_7d = TRUE) AS total, COUNT(*) FILTER (WHERE verified_7d = TRUE AND correct_7d = TRUE) AS correct FROM predictions GROUP BY signal");
     const bySignal = { ACHETER:{total:0,correct:0}, VENDRE:{total:0,correct:0}, CONSERVER:{total:0,correct:0} };
-    verified.forEach(p => { if(bySignal[p.signal]){bySignal[p.signal].total++;if(p.correct7d)bySignal[p.signal].correct++;} });
-    res.json({ predictions: preds, stats: { total: preds.length, totalVerified: verified.length, accuracy, bySignal } });
+    bySignalRes.rows.forEach(r => { if(bySignal[r.signal]){ bySignal[r.signal].total = parseInt(r.total); bySignal[r.signal].correct = parseInt(r.correct); } });
+    res.json({ predictions: preds, stats: { total: totalCount, totalVerified: verifiedCount, accuracy, bySignal } });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
