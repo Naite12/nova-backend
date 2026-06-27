@@ -233,6 +233,44 @@ app.use('/api/', function(req, res, next) {
 
 function genToken() { return crypto.randomBytes(32).toString('hex'); }
 
+// ── PERSISTENT SESSIONS (survive server restarts/redeploys) ──
+// Tokens are stored in PostgreSQL instead of memory so users stay logged in across deploys.
+async function initSessionsTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('Sessions table ready');
+  } catch(e) { console.log('initSessionsTable error:', e.message); }
+}
+initSessionsTable();
+
+async function createSession(email) {
+  const token = genToken();
+  try {
+    await pool.query('INSERT INTO sessions (token, email) VALUES ($1, $2)', [token, email]);
+    sessions[token] = email; // keep in-memory cache too for speed
+  } catch(e) { console.log('createSession error:', e.message); }
+  return token;
+}
+
+async function getSessionEmail(token) {
+  if (!token) return null;
+  if (sessions[token]) return sessions[token]; // fast path: in-memory cache
+  try {
+    const r = await pool.query('SELECT email FROM sessions WHERE token = $1', [token]);
+    if (r.rows.length > 0) {
+      sessions[token] = r.rows[0].email; // re-populate cache after a restart
+      return r.rows[0].email;
+    }
+  } catch(e) { console.log('getSessionEmail error:', e.message); }
+  return null;
+}
+
 // bcrypt with automatic salt (cost factor 12)
 async function hashPassword(p) { return await bcrypt.hash(p, 12); }
 // legacy SHA-256 (only used to verify & migrate old accounts)
@@ -262,8 +300,7 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     // plan is validated against a whitelist to prevent privilege escalation via the register body
     const safePlan = ['free', 'essential', 'premium', 'vip'].indexOf(plan) !== -1 ? plan : 'vip';
     await pool.query('INSERT INTO users (email, password, plan) VALUES ($1, $2, $3)', [email, hashed, safePlan]);
-    const token = genToken();
-    sessions[token] = email;
+    const token = await createSession(email);
     res.json({ token, email, plan: safePlan });
   } catch(e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
@@ -300,29 +337,30 @@ app.post('/auth/login', authLimiter, async (req, res) => {
 
     // success — clear failed counter
     delete failedLogins[ip];
-    const token = genToken();
-    sessions[token] = email;
+    const token = await createSession(email);
     res.json({ token, email, plan: user.plan });
   } catch(e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.post('/auth/change-password', authLimiter, async (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token || !sessions[token]) return res.status(401).json({ error: 'Non autorise' });
+  const sessionEmail = await getSessionEmail(token);
+  if (!sessionEmail) return res.status(401).json({ error: 'Non autorise' });
   const { password } = req.body;
   if (!password || typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Mot de passe trop court (8 caracteres minimum)' });
   if (password.length > 200) return res.status(400).json({ error: 'Mot de passe trop long' });
   try {
     const hashed = await hashPassword(password);
-    await pool.query('UPDATE users SET password = $1 WHERE email = $2', [hashed, sessions[token]]);
+    await pool.query('UPDATE users SET password = $1 WHERE email = $2', [hashed, sessionEmail]);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
-function auth(req, res, next) {
+async function auth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token || !sessions[token]) return res.status(401).json({ error: 'Non autorise' });
-  req.userEmail = sessions[token];
+  const email = await getSessionEmail(token);
+  if (!email) return res.status(401).json({ error: 'Non autorise' });
+  req.userEmail = email;
   next();
 }
 
