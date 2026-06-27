@@ -298,7 +298,7 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Un compte existe deja avec cet email' });
     const hashed = await hashPassword(password);
     // plan is validated against a whitelist to prevent privilege escalation via the register body
-    const safePlan = ['free', 'essential', 'premium', 'vip'].indexOf(plan) !== -1 ? plan : 'vip';
+    const safePlan = ['free', 'premium', 'vip'].indexOf(plan) !== -1 ? plan : 'vip';
     await pool.query('INSERT INTO users (email, password, plan) VALUES ($1, $2, $3)', [email, hashed, safePlan]);
     const token = await createSession(email);
     res.json({ token, email, plan: safePlan });
@@ -450,7 +450,8 @@ app.post('/api/admin/revenue', adminLimiter, adminGuard, async (req, res) => {
       SELECT plan, COUNT(*) AS count FROM users
       WHERE plan IN ('vip','premium','essential') GROUP BY plan
     `);
-    const prices = { vip: 49, premium: 19, essential: 9 };
+    // Premium repriced to 14. Essential kept at 9 only for legacy accounts (no longer sold).
+    const prices = { vip: 49, premium: 14, essential: 9 };
     let mrr = 0;
     const breakdown = { vip: 0, premium: 0, essential: 0 };
     result.rows.forEach(function(r) {
