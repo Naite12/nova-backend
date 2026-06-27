@@ -1186,6 +1186,108 @@ async function getPriceForSymbol(symbol) {
   } catch(e) { return null; }
 }
 
+// ── TECHNICAL ANALYSIS ENGINE — real indicators on historical data ──
+// Fetches ~3 months of daily candles and computes convergent technical signals.
+async function getHistoricalCloses(symbol) {
+  try {
+    const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=3mo', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const d = await r.json();
+    const result = d?.chart?.result?.[0];
+    if (!result) return null;
+    const closes = (result.indicators?.quote?.[0]?.close || []).filter(p => p !== null && p !== undefined);
+    const meta = result.meta;
+    if (closes.length < 50 || !meta?.regularMarketPrice) return null;
+    return { closes: closes, price: meta.regularMarketPrice, name: meta.symbol || symbol };
+  } catch(e) { return null; }
+}
+
+function sma(arr, period) {
+  if (arr.length < period) return null;
+  const slice = arr.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+function rsi(closes, period = 14) {
+  if (closes.length < period + 1) return null;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gains += diff; else losses -= diff;
+  }
+  const avgGain = gains / period, avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+function ema(arr, period) {
+  if (arr.length < period) return null;
+  const k = 2 / (period + 1);
+  let emaVal = arr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < arr.length; i++) emaVal = arr[i] * k + emaVal * (1 - k);
+  return emaVal;
+}
+
+function macd(closes) {
+  const ema12 = ema(closes, 12);
+  const ema26 = ema(closes, 26);
+  if (ema12 === null || ema26 === null) return null;
+  return ema12 - ema26; // positive = bullish momentum
+}
+
+// Core technical signal generator — convergence of multiple indicators
+function novaTechnicalSignal(symbol, closes, price) {
+  const sma20 = sma(closes, 20);
+  const sma50 = sma(closes, 50);
+  const rsiVal = rsi(closes, 14);
+  const macdVal = macd(closes);
+  const prevClose = closes[closes.length - 2] || price;
+  const momentum5 = closes.length >= 6 ? ((price - closes[closes.length - 6]) / closes[closes.length - 6]) * 100 : 0;
+
+  // Build a convergence score: each indicator votes bullish (+) or bearish (-)
+  let bull = 0, bear = 0;
+  const reasons = [];
+
+  // 1. Trend: price vs moving averages
+  if (sma20 && sma50) {
+    if (price > sma20 && sma20 > sma50) { bull += 2; reasons.push('tendance haussiere confirmee (prix > MM20 > MM50)'); }
+    else if (price < sma20 && sma20 < sma50) { bear += 2; reasons.push('tendance baissiere confirmee (prix < MM20 < MM50)'); }
+    else if (price > sma50) { bull += 1; reasons.push('prix au-dessus de la MM50'); }
+    else { bear += 1; reasons.push('prix sous la MM50'); }
+  }
+
+  // 2. RSI: overbought / oversold
+  if (rsiVal !== null) {
+    if (rsiVal < 30) { bull += 2; reasons.push('RSI en survente (' + rsiVal.toFixed(0) + ')'); }
+    else if (rsiVal > 70) { bear += 2; reasons.push('RSI en surachat (' + rsiVal.toFixed(0) + ')'); }
+    else if (rsiVal < 45) { bull += 1; }
+    else if (rsiVal > 55) { bear += 0.5; }
+  }
+
+  // 3. MACD momentum
+  if (macdVal !== null) {
+    if (macdVal > 0) { bull += 1; reasons.push('momentum MACD positif'); }
+    else { bear += 1; reasons.push('momentum MACD negatif'); }
+  }
+
+  // 4. Short-term momentum (5 days)
+  if (momentum5 > 4) { bear += 0.5; } // too hot, mean reversion risk
+  else if (momentum5 < -8) { bull += 1; reasons.push('survente court terme marquee'); }
+
+  // Decide signal from convergence — require real conviction for directional calls
+  let signal, confidence;
+  const net = bull - bear;
+  if (net >= 3) { signal = 'ACHETER'; confidence = Math.min(90, 60 + net * 5); }
+  else if (net <= -3) { signal = 'VENDRE'; confidence = Math.min(90, 60 + Math.abs(net) * 5); }
+  else { signal = 'CONSERVER'; confidence = 55 + Math.floor(Math.abs(net) * 3); }
+
+  let reasoning = reasons.length > 0
+    ? 'Analyse technique: ' + reasons.slice(0, 3).join(', ') + '.'
+    : 'Configuration neutre, pas de signal directionnel fort.';
+
+  return { signal, confidence: Math.round(confidence), reasoning };
+}
+
 function novaAnalyzeForTrade(symbol, price, change) {
   let score = 50;
   let signal = 'HOLD';
@@ -1224,9 +1326,10 @@ async function runAutoPredictions() {
     let saved = 0;
     for (const symbol of TRADING_UNIVERSE) {
       try {
-        const d = await getPriceForSymbol(symbol);
-        if (!d) { await new Promise(r => setTimeout(r, 250)); continue; }
-        const analysis = novaGenerateSignal(symbol, d.price, d.change);
+        const hist = await getHistoricalCloses(symbol);
+        if (!hist) { await new Promise(r => setTimeout(r, 300)); continue; }
+        const d = { price: hist.price, name: hist.name, change: hist.closes.length >= 2 ? ((hist.price - hist.closes[hist.closes.length-2]) / hist.closes[hist.closes.length-2] * 100) : 0 };
+        const analysis = novaTechnicalSignal(symbol, hist.closes, hist.price);
         const dateStr = new Date().toLocaleDateString('fr-FR');
         await pool.query(
           'INSERT INTO predictions (symbol, name, signal, price, confidence, reasoning, date_str) VALUES ($1,$2,$3,$4,$5,$6,$7)',
@@ -1246,9 +1349,9 @@ async function runAutoPredictions() {
         );
         saved++;
       } catch(e) { console.log('Auto-prediction error for', symbol, e.message); }
-      await new Promise(r => setTimeout(r, 350));
+      await new Promise(r => setTimeout(r, 500));
     }
-    console.log('Auto-predictions done:', saved, 'signals saved');
+    console.log('Auto-predictions done:', saved, 'signals saved (technical analysis engine)');
   } catch(e) { console.log('runAutoPredictions error:', e.message); }
 }
 
@@ -1281,6 +1384,23 @@ app.post('/api/admin/emergency-stop', adminLimiter, adminGuard, async (req, res)
 
 app.post('/api/admin/system-status', adminLimiter, adminGuard, async (req, res) => {
   res.json({ systemActive: SYSTEM_ACTIVE });
+});
+
+// ── SECURE RESET: wipe ONLY the predictions table (analyses are preserved) ──
+// Requires admin secret + explicit confirmation phrase to prevent accidental wipes.
+app.post('/api/admin/reset-predictions', adminLimiter, adminGuard, async (req, res) => {
+  const { confirm } = req.body;
+  if (confirm !== 'RESET-PREDICTIONS-CONFIRM') {
+    return res.status(400).json({ error: 'Phrase de confirmation requise', needConfirm: true });
+  }
+  try {
+    const countBefore = await pool.query('SELECT COUNT(*) AS c FROM predictions');
+    await pool.query('DELETE FROM predictions');
+    logSecurityEvent('predictions_reset', 'critical', getIP(req),
+      'Table predictions videe par admin (' + countBefore.rows[0].c + ' lignes supprimees). Analyses conservees.', {});
+    console.log('Predictions table reset:', countBefore.rows[0].c, 'rows deleted');
+    res.json({ ok: true, deleted: parseInt(countBefore.rows[0].c) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/predictions/auto-run', adminLimiter, adminGuard, async (req, res) => {
