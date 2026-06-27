@@ -1518,11 +1518,15 @@ async function runAutonomousTrader() {
         const opportunities = [];
         for (const symbol of TRADING_UNIVERSE) {
           if (heldSymbols.includes(symbol)) continue;
-          if (!pricesCache[symbol]) continue;
-          const analysis = novaAnalyzeForTrade(symbol, pricesCache[symbol].price, pricesCache[symbol].change);
-          if (analysis.signal === 'BUY' && analysis.confidence >= profile.minConfidence) {
-            opportunities.push({ symbol, ...analysis, ...pricesCache[symbol] });
+          // Use the technical analysis engine (RSI, MACD, moving averages, convergence)
+          const hist = await getHistoricalCloses(symbol);
+          if (!hist) { await new Promise(r => setTimeout(r, 200)); continue; }
+          const analysis = novaTechnicalSignal(symbol, hist.closes, hist.price);
+          // Only ACHETER signals with strong conviction become trade opportunities
+          if (analysis.signal === 'ACHETER' && analysis.confidence >= profile.minConfidence) {
+            opportunities.push({ symbol, signal: analysis.signal, confidence: analysis.confidence, reasoning: analysis.reasoning, price: hist.price, name: hist.name });
           }
+          await new Promise(r => setTimeout(r, 250));
         }
         opportunities.sort((a, b) => b.confidence - a.confidence);
         const slots = profile.maxPositions - stillOpen.rows.length;
