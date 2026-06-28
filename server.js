@@ -721,6 +721,38 @@ app.get('/api/finance', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── CATALOG: live prices for the entire trading universe (cached 60s) ──
+let catalogCache = { data: null, ts: 0 };
+app.get('/api/catalog', async (req, res) => {
+  try {
+    // Serve from cache if fresh (under 60s) to avoid hammering Yahoo
+    if (catalogCache.data && (Date.now() - catalogCache.ts) < 60000) {
+      return res.json({ assets: catalogCache.data, cached: true });
+    }
+    const assets = [];
+    for (const symbol of TRADING_UNIVERSE) {
+      try {
+        const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const d = await r.json();
+        const result = d?.chart?.result?.[0];
+        if (!result || !result.meta) continue;
+        const meta = result.meta;
+        const price = meta.regularMarketPrice;
+        const prev = meta.chartPreviousClose || meta.previousClose;
+        const change = prev ? parseFloat(((price - prev) / prev * 100).toFixed(2)) : 0;
+        // Categorize
+        let category = 'stock';
+        if (symbol.includes('-USD')) category = 'crypto';
+        else if (['SPY','QQQ','DIA','IWM','^GSPC','^IXIC','^DJI','VTI','VOO'].some(e => symbol.includes(e))) category = 'etf';
+        assets.push({ symbol, name: meta.longName || meta.shortName || symbol, price, change, currency: meta.currency || 'USD', category });
+      } catch(e) { /* skip this asset */ }
+      await new Promise(r => setTimeout(r, 60));
+    }
+    catalogCache = { data: assets, ts: Date.now() };
+    res.json({ assets, cached: false });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── PREDICTIONS ──
 app.post('/api/predictions/save', async (req, res) => {
   const { symbol, name, signal, price, confidence, reasoning } = req.body;
