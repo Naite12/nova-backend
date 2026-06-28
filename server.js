@@ -386,16 +386,65 @@ app.get('/user/data', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── MEMORY EXTRACTION ──
+// Analyzes a user message and extracts a durable fact about them (goals, risk profile,
+// preferences, situation). Returns a short fact string, or null if nothing worth storing.
+async function extractMemoryFact(message, existingFacts) {
+  if (!message || message.length < 8) return null;
+  try {
+    const existing = (existingFacts && existingFacts.length) ? existingFacts.join(' | ') : '(aucun)';
+    const prompt = 'Tu analyses un message d un utilisateur d une plateforme financiere. ' +
+      'Identifie UNIQUEMENT s il contient une information DURABLE et UTILE a memoriser sur cette personne. ' +
+      'Deux categories a capter: ' +
+      '1) PERSONNEL: prenom, age, metier/profession, ville/pays, langue preferee, situation (etudiant, retraite...). ' +
+      '2) FINANCIER: objectif d investissement, profil de risque, horizon, preferences d actifs ou secteurs, situation financiere, contraintes, montant disponible. ' +
+      'Ignore les questions, salutations simples, demandes d analyse ponctuelles et small talk. ' +
+      'Faits deja connus: ' + existing + '. ' +
+      'Si le message contient un nouveau fait durable PAS deja connu, reponds UNIQUEMENT avec ce fait en une courte phrase a la 3e personne ' +
+      '(ex: "Se prenomme Anton", "A 19 ans", "Est apprenti menuisier", "Prefere un profil de risque agressif", "S interesse aux cryptos et valeurs tech"). ' +
+      'Si plusieurs faits, choisis le plus important. ' +
+      'Si rien a memoriser ou deja connu, reponds EXACTEMENT: NONE. ' +
+      'Message: "' + message.slice(0, 500) + '"';
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 60, messages: [{ role: 'user', content: prompt }] })
+    });
+    const d = await r.json();
+    const text = (d.content && d.content[0] && d.content[0].text || '').trim();
+    if (!text || text === 'NONE' || text.toUpperCase().indexOf('NONE') === 0 || text.length > 150) return null;
+    return text;
+  } catch(e) { console.log('extractMemoryFact error:', e.message); return null; }
+}
+
 app.post('/user/chat', auth, async (req, res) => {
   const { message, role } = req.body;
   try {
-    const result = await pool.query('SELECT chat_history FROM users WHERE email = $1', [req.userEmail]);
+    const result = await pool.query('SELECT chat_history, memory FROM users WHERE email = $1', [req.userEmail]);
     const hist = result.rows[0]?.chat_history || [];
     hist.push({ role, message, time: new Date().toISOString() });
     if (hist.length > 100) hist.splice(0, hist.length - 100);
     await pool.query('UPDATE users SET chat_history = $1 WHERE email = $2', [JSON.stringify(hist), req.userEmail]);
+    // Respond immediately — memory extraction runs in the background (user messages only)
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    if (role === 'user') {
+      const mem = result.rows[0]?.memory || { facts: [], conversations: 0 };
+      const fact = await extractMemoryFact(message, mem.facts);
+      if (fact) {
+        mem.facts = mem.facts || [];
+        // Avoid near-duplicates
+        const exists = mem.facts.some(f => f.toLowerCase() === fact.toLowerCase());
+        if (!exists) {
+          mem.facts.push(fact);
+          if (mem.facts.length > 20) mem.facts = mem.facts.slice(-20);
+          await pool.query('UPDATE users SET memory = $1 WHERE email = $2', [JSON.stringify(mem), req.userEmail]);
+          console.log('Memory fact saved for', req.userEmail, ':', fact);
+        }
+      }
+    }
+  } catch(e) {
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/user/memory', auth, async (req, res) => {
