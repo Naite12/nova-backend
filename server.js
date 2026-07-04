@@ -817,6 +817,49 @@ app.post('/api/predictions/save', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── PERFORMANCE HISTORY: hypothetical portfolio + accuracy over time ──
+// Honest simulation: follows every VERIFIED BUY signal from the new engine,
+// applying its real 7-day result (gains AND losses). Based on the technical engine only.
+app.get('/api/performance', async (req, res) => {
+  try {
+    // All verified BUY signals, oldest first
+    const rows = (await pool.query(
+      "SELECT date, result_7d, correct_7d FROM predictions WHERE signal = 'ACHETER' AND verified_7d = TRUE AND result_7d IS NOT NULL ORDER BY date ASC"
+    )).rows;
+
+    const startCapital = 1000;
+    const positionFraction = 0.10; // each signal uses 10% of current capital (realistic, diversified)
+    let capital = startCapital;
+    const portfolioCurve = [{ date: null, value: startCapital, label: 'start' }];
+    const accuracyCurve = [];
+    let wins = 0, total = 0;
+
+    rows.forEach(function(r) {
+      const ret = parseFloat(r.result_7d) / 100; // e.g. 0.05 for +5%
+      // Apply the real result to a fraction of capital
+      capital = capital * (1 + positionFraction * ret);
+      portfolioCurve.push({ date: r.date, value: Math.round(capital * 100) / 100 });
+      // Rolling accuracy
+      total++;
+      if (r.correct_7d === true) wins++;
+      accuracyCurve.push({ date: r.date, accuracy: Math.round((wins / total) * 100) });
+    });
+
+    const finalValue = Math.round(capital * 100) / 100;
+    const totalReturn = Math.round(((finalValue - startCapital) / startCapital) * 10000) / 100; // %
+
+    res.json({
+      startCapital,
+      finalValue,
+      totalReturn,
+      signalsCount: rows.length,
+      portfolioCurve,
+      accuracyCurve,
+      note: 'Simulation basee sur les signaux ACHETER verifies du moteur technique. Chaque position = 10% du capital. Resultats reels a 7 jours, gains et pertes inclus.'
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/predictions', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
