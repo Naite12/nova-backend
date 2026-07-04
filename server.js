@@ -42,6 +42,17 @@ app.use(cors({
 
 app.use(express.json({ limit: '1mb' }));
 
+// ── SAFE ERROR HANDLING ──
+// Logs the real error server-side (for debugging) but returns a generic message
+// to the client, so internal details (DB structure, paths, stack) never leak.
+function safeError(res, e, context) {
+  const detail = (e && e.message) ? e.message : String(e);
+  console.error('[ERROR]' + (context ? ' ' + context : '') + ':', detail);
+  if (res && !res.headersSent) {
+    res.status(500).json({ error: 'Une erreur interne est survenue. Veuillez reessayer.' });
+  }
+}
+
 // ── RATE LIMITERS ──
 // General API limiter: 300 requests / 15 min per IP
 const generalLimiter = rateLimit({
@@ -365,15 +376,36 @@ async function auth(req, res, next) {
 }
 
 // Admin guard middleware — constant-time comparison to prevent timing attacks
+// Track failed admin attempts per IP for temporary lockout
+const adminFailedAttempts = {};
 function adminGuard(req, res, next) {
+  const ip = getIP(req);
+  // Temporary lockout: 5 failed attempts within 15 min blocks that IP
+  const record = adminFailedAttempts[ip];
+  if (record && record.count >= 5 && (Date.now() - record.first) < 15 * 60 * 1000) {
+    logSecurityEvent('admin_lockout', 'critical', ip, 'IP bloquee apres 5 tentatives admin echouees', { path: req.path });
+    return res.status(429).json({ error: 'Trop de tentatives. Reessayez plus tard.' });
+  }
+  // Ensure admin secret is actually configured (never allow empty match)
+  if (!ADMIN_SECRET || ADMIN_SECRET.length < 8) {
+    console.error('[SECURITY] ADMIN_SECRET not configured properly');
+    return res.status(503).json({ error: 'Service indisponible.' });
+  }
   const provided = (req.body && req.body.secret) || '';
   const a = Buffer.from(String(provided));
   const b = Buffer.from(String(ADMIN_SECRET));
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    const ip = getIP(req);
+    // Record failed attempt
+    if (!record || (Date.now() - record.first) >= 15 * 60 * 1000) {
+      adminFailedAttempts[ip] = { count: 1, first: Date.now() };
+    } else {
+      record.count++;
+    }
     logSecurityEvent('admin_breach_attempt', 'critical', ip, 'Tentative d acces admin avec mauvais secret sur ' + req.path, { path: req.path });
     return res.status(401).json({ error: 'Non autorise' });
   }
+  // Success — clear any failed record
+  delete adminFailedAttempts[ip];
   next();
 }
 
@@ -383,7 +415,7 @@ app.get('/user/data', auth, async (req, res) => {
     const u = result.rows[0];
     if (!u) return res.status(404).json({ error: 'User not found' });
     res.json({ email: u.email, plan: u.plan, memory: u.memory, chatHistory: (u.chat_history || []).slice(-50) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── MEMORY EXTRACTION ──
@@ -443,7 +475,7 @@ app.post('/user/chat', auth, async (req, res) => {
       }
     }
   } catch(e) {
-    if (!res.headersSent) res.status(500).json({ error: e.message });
+    if (!res.headersSent) safeError(res, e);
   }
 });
 
@@ -456,21 +488,21 @@ app.post('/user/memory', auth, async (req, res) => {
     mem.conversations = (mem.conversations || 0) + 1;
     await pool.query('UPDATE users SET memory = $1 WHERE email = $2', [JSON.stringify(mem), req.userEmail]);
     res.json(mem);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.get('/user/memory', auth, async (req, res) => {
   try {
     const result = await pool.query('SELECT memory FROM users WHERE email = $1', [req.userEmail]);
     res.json(result.rows[0]?.memory || { facts: [], conversations: 0 });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.delete('/user/memory', auth, async (req, res) => {
   try {
     await pool.query('UPDATE users SET memory = $1, chat_history = $2 WHERE email = $3', [JSON.stringify({ facts: [], conversations: 0 }), JSON.stringify([]), req.userEmail]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── ADMIN — Support access to user conversations (secured by admin secret) ──
@@ -490,7 +522,7 @@ app.post('/api/admin/users', adminLimiter, adminGuard, async (req, res) => {
       };
     });
     res.json({ users: users, total: users.length });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/admin/revenue', adminLimiter, adminGuard, async (req, res) => {
@@ -521,7 +553,7 @@ app.post('/api/admin/revenue', adminLimiter, adminGuard, async (req, res) => {
       prices: prices,
       recent: recent.rows
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/admin/conversation', adminLimiter, adminGuard, async (req, res) => {
@@ -537,7 +569,7 @@ app.post('/api/admin/conversation', adminLimiter, adminGuard, async (req, res) =
       memory: u.memory,
       history: u.chat_history || []
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // Security events dashboard data
@@ -566,7 +598,7 @@ app.post('/api/admin/security', adminLimiter, adminGuard, async (req, res) => {
       stats: stats.rows[0],
       topIps: topIps.rows
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── ADMIN OVERVIEW — all real stats aggregated for the control center ──
@@ -673,7 +705,7 @@ app.post('/api/admin/overview', adminLimiter, adminGuard, async (req, res) => {
         serverNow: new Date().toISOString()
       }
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── STRIPE ──
@@ -698,7 +730,14 @@ app.post('/create-subscription', async (req, res) => {
     
     const subscription = await stripe.subscriptions.create(subData);
     res.json({ subscriptionId: subscription.id, clientSecret: subscription.latest_invoice.payment_intent?.client_secret, status: subscription.status });
-  } catch (e) { res.status(400).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[ERROR] create-subscription:', e.message);
+    // Stripe card errors are safe to show the user; everything else stays generic
+    if (e.type === 'StripeCardError') {
+      return res.status(400).json({ error: e.message });
+    }
+    res.status(400).json({ error: 'Le paiement n a pas pu etre traite. Veuillez reessayer.' });
+  }
 });
 
 // ── CLAUDE API ──
@@ -732,7 +771,7 @@ app.post('/api/chat', async (req, res) => {
       if (textBlocks) d.content = [{ type: 'text', text: textBlocks }];
     }
     res.json(d);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { safeError(res, e); }
 });
 
 // ── FINANCE ──
@@ -767,7 +806,7 @@ app.get('/api/finance', async (req, res) => {
     const prev = meta.chartPreviousClose || meta.previousClose;
     const change = prev ? ((price - prev) / prev * 100).toFixed(2) : 0;
     res.json({ symbol, name: meta.longName || symbol, price, change: parseFloat(change), currency: meta.currency, market: meta.exchangeName });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { safeError(res, e); }
 });
 
 // ── CATALOG: live prices for the entire trading universe (cached 60s) ──
@@ -799,7 +838,7 @@ app.get('/api/catalog', async (req, res) => {
     }
     catalogCache = { data: assets, ts: Date.now() };
     res.json({ assets, cached: false });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── PREDICTIONS ──
@@ -814,7 +853,7 @@ app.post('/api/predictions/save', async (req, res) => {
     );
     console.log('Prediction saved:', symbol, signal, price);
     res.json({ ok: true, id: result.rows[0].id });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── PERFORMANCE HISTORY: hypothetical portfolio + accuracy over time ──
@@ -857,7 +896,7 @@ app.get('/api/performance', async (req, res) => {
       accuracyCurve,
       note: 'Simulation basee sur les signaux ACHETER verifies du moteur technique. Chaque position = 10% du capital. Resultats reels a 7 jours, gains et pertes inclus.'
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.get('/api/predictions', async (req, res) => {
@@ -885,7 +924,7 @@ app.get('/api/predictions', async (req, res) => {
     const bySignal = { ACHETER:{total:0,correct:0}, VENDRE:{total:0,correct:0}, CONSERVER:{total:0,correct:0} };
     bySignalRes.rows.forEach(r => { if(bySignal[r.signal]){ bySignal[r.signal].total = parseInt(r.total); bySignal[r.signal].correct = parseInt(r.correct); } });
     res.json({ predictions: preds, stats: { total: totalCount, totalVerified: verifiedCount, accuracy, bySignal } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // Asset-class-aware thresholds — crypto is naturally more volatile than stocks/ETFs/forex
@@ -1170,7 +1209,7 @@ app.post('/api/predictions/reverify', adminLimiter, adminGuard, async (req, res)
       }
     }
     res.json({ ok: true, updated, total: result.rows.length + result30.rows.length });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // Force an immediate verification pass (on-demand, from the control center)
@@ -1195,7 +1234,7 @@ app.post('/api/predictions/verify-now', adminLimiter, adminGuard, async (req, re
       total_verified_30d: parseInt(after.rows[0].v30),
       still_pending_7d: parseInt(pending.rows[0].c)
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/send-reports', adminLimiter, adminGuard, async (req, res) => {
@@ -1205,12 +1244,24 @@ app.post('/send-reports', adminLimiter, adminGuard, async (req, res) => {
 
 app.get('/', (req, res) => res.json({ status: 'N.O.V.A. Backend Online', version: '3.0' }));
 
+// ── HEALTH CHECK (for external monitoring like UptimeRobot) ──
+// Verifies the database is reachable. Returns 200 if healthy, 503 if not.
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'healthy', db: 'connected', systemActive: (typeof SYSTEM_ACTIVE !== 'undefined' ? SYSTEM_ACTIVE : true), time: new Date().toISOString() });
+  } catch(e) {
+    console.error('[HEALTH] Database check failed:', e.message);
+    res.status(503).json({ status: 'unhealthy', db: 'disconnected' });
+  }
+});
+
 // ── WATCHLIST ──
 app.get('/api/watchlist', auth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM watchlists WHERE user_email = $1 ORDER BY added_at DESC', [req.userEmail]);
     res.json({ watchlist: result.rows });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/watchlist', auth, async (req, res) => {
@@ -1219,14 +1270,14 @@ app.post('/api/watchlist', auth, async (req, res) => {
   try {
     await pool.query('INSERT INTO watchlists (user_email, symbol, name) VALUES ($1, $2, $3) ON CONFLICT (user_email, symbol) DO NOTHING', [req.userEmail, symbol, name || symbol]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.delete('/api/watchlist/:symbol', auth, async (req, res) => {
   try {
     await pool.query('DELETE FROM watchlists WHERE user_email = $1 AND symbol = $2', [req.userEmail, req.params.symbol]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── ALERTS ──
@@ -1234,7 +1285,7 @@ app.get('/api/alerts', auth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM alerts WHERE user_email = $1 ORDER BY created_at DESC', [req.userEmail]);
     res.json({ alerts: result.rows });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/alerts', auth, async (req, res) => {
@@ -1247,14 +1298,14 @@ app.post('/api/alerts', auth, async (req, res) => {
       [req.userEmail, symbol, name || symbol, condition, parseFloat(target_price)]
     );
     res.json({ ok: true, id: result.rows[0].id });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.delete('/api/alerts/:id', auth, async (req, res) => {
   try {
     await pool.query('DELETE FROM alerts WHERE user_email = $1 AND id = $2', [req.userEmail, req.params.id]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── ALERT CHECKER ──
@@ -1323,7 +1374,7 @@ app.get('/api/portfolio', auth, async (req, res) => {
         totalTrades: closed.rows.length
       }
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/portfolio/create', auth, async (req, res) => {
@@ -1333,7 +1384,7 @@ app.post('/api/portfolio/create', auth, async (req, res) => {
     await pool.query('INSERT INTO portfolios (user_email, initial_capital, cash, risk_profile) VALUES ($1, $2, $2, $3) ON CONFLICT (user_email) DO UPDATE SET initial_capital = $2, cash = $2, risk_profile = $3, active = TRUE', [req.userEmail, parseFloat(capital), risk_profile || 'balanced']);
     await pool.query('DELETE FROM positions WHERE user_email = $1', [req.userEmail]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/portfolio/toggle', auth, async (req, res) => {
@@ -1341,7 +1392,7 @@ app.post('/api/portfolio/toggle', auth, async (req, res) => {
     await pool.query('UPDATE portfolios SET active = NOT active WHERE user_email = $1', [req.userEmail]);
     const r = await pool.query('SELECT active FROM portfolios WHERE user_email = $1', [req.userEmail]);
     res.json({ active: r.rows[0]?.active });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.delete('/api/portfolio', auth, async (req, res) => {
@@ -1349,7 +1400,7 @@ app.delete('/api/portfolio', auth, async (req, res) => {
     await pool.query('DELETE FROM positions WHERE user_email = $1', [req.userEmail]);
     await pool.query('DELETE FROM portfolios WHERE user_email = $1', [req.userEmail]);
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 // ── AUTONOMOUS TRADER ──
@@ -1594,7 +1645,7 @@ app.post('/api/admin/reset-predictions', adminLimiter, adminGuard, async (req, r
       'Table predictions videe par admin (' + countBefore.rows[0].c + ' lignes supprimees). Analyses conservees.', {});
     console.log('Predictions table reset:', countBefore.rows[0].c, 'rows deleted');
     res.json({ ok: true, deleted: parseInt(countBefore.rows[0].c) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.post('/api/predictions/auto-run', adminLimiter, adminGuard, async (req, res) => {
@@ -1697,7 +1748,7 @@ app.post('/api/analyses/save', async (req, res) => {
       [symbol, name, price, change_pct, signal, confidence, full_analysis, market_data || {}, date_str, user_email]
     );
     res.json({ ok: true, id: result.rows[0].id });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 app.get('/api/analyses', async (req, res) => {
@@ -1718,7 +1769,7 @@ app.get('/api/analyses', async (req, res) => {
         dominant: dominantRes.rows[0] ? dominantRes.rows[0].signal : '--'
       }
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { safeError(res, e); }
 });
 
 const PORT = process.env.PORT || 3001;
