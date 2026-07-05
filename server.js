@@ -1602,6 +1602,12 @@ async function runAutoPredictions() {
         const d = { price: hist.price, name: hist.name, change: hist.closes.length >= 2 ? ((hist.price - hist.closes[hist.closes.length-2]) / hist.closes[hist.closes.length-2] * 100) : 0 };
         const analysis = novaTechnicalSignal(symbol, hist.closes, hist.price);
         const dateStr = new Date().toLocaleDateString('fr-FR');
+        // Anti-duplicate guard: skip if a prediction already exists for this symbol today
+        const existing = await pool.query(
+          'SELECT id FROM predictions WHERE symbol = $1 AND date_str = $2 LIMIT 1',
+          [symbol, dateStr]
+        );
+        if (existing.rows.length > 0) { continue; } // already predicted today, skip
         await pool.query(
           'INSERT INTO predictions (symbol, name, signal, price, confidence, reasoning, date_str) VALUES ($1,$2,$3,$4,$5,$6,$7)',
           [symbol, d.name || symbol, analysis.signal, d.price, analysis.confidence, analysis.reasoning, dateStr]
@@ -1659,6 +1665,26 @@ app.post('/api/admin/system-status', adminLimiter, adminGuard, async (req, res) 
 
 // ── SECURE RESET: wipe ONLY the predictions table (analyses are preserved) ──
 // Requires admin secret + explicit confirmation phrase to prevent accidental wipes.
+// ── DEDUPLICATE: remove duplicate predictions, keeping the oldest of each group ──
+app.post('/api/admin/dedupe-predictions', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const before = await pool.query('SELECT COUNT(*) AS c FROM predictions');
+    // Keep the row with the smallest id for each (symbol, date_str) group, delete the rest
+    const result = await pool.query(`
+      DELETE FROM predictions
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM predictions GROUP BY symbol, date_str
+      )
+    `);
+    const after = await pool.query('SELECT COUNT(*) AS c FROM predictions');
+    const removed = parseInt(before.rows[0].c) - parseInt(after.rows[0].c);
+    logSecurityEvent('predictions_dedupe', 'warning', getIP(req),
+      'Deduplication: ' + removed + ' doublons supprimes. ' + after.rows[0].c + ' predictions restantes.', {});
+    console.log('Deduplicated predictions:', removed, 'removed,', after.rows[0].c, 'remaining');
+    res.json({ ok: true, removed: removed, remaining: parseInt(after.rows[0].c) });
+  } catch(e) { safeError(res, e); }
+});
+
 app.post('/api/admin/reset-predictions', adminLimiter, adminGuard, async (req, res) => {
   const { confirm } = req.body;
   if (confirm !== 'RESET-PREDICTIONS-CONFIRM') {
