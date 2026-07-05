@@ -887,6 +887,31 @@ app.get('/api/performance', async (req, res) => {
     const finalValue = Math.round(capital * 100) / 100;
     const totalReturn = Math.round(((finalValue - startCapital) / startCapital) * 10000) / 100; // %
 
+    // ── MARKET BENCHMARK: how did the market do over the SAME period? ──
+    // Honest comparison: buy & hold S&P 500 (SPY) and Bitcoin (BTC) over the signal window.
+    let benchmarks = { spy: null, btc: null };
+    if (rows.length >= 2) {
+      const firstDate = new Date(rows[0].date);
+      const lastDate = new Date(rows[rows.length - 1].date);
+      const daysSpan = Math.max(7, Math.ceil((lastDate - firstDate) / (1000 * 60 * 60 * 24)) + 7);
+      const range = daysSpan <= 30 ? '1mo' : daysSpan <= 90 ? '3mo' : '6mo';
+      async function benchReturn(symbol) {
+        try {
+          const hist = await getHistoricalCloses(symbol);
+          if (!hist || !hist.closes || hist.closes.length < 2) return null;
+          // Approximate: use the last N closes matching the signal window
+          const closes = hist.closes;
+          const startIdx = Math.max(0, closes.length - Math.min(closes.length, daysSpan));
+          const startPrice = closes[startIdx];
+          const endPrice = closes[closes.length - 1];
+          if (!startPrice) return null;
+          return Math.round(((endPrice - startPrice) / startPrice) * 10000) / 100;
+        } catch(e) { return null; }
+      }
+      benchmarks.spy = await benchReturn('SPY');
+      benchmarks.btc = await benchReturn('BTC-USD');
+    }
+
     res.json({
       startCapital,
       finalValue,
@@ -894,6 +919,7 @@ app.get('/api/performance', async (req, res) => {
       signalsCount: rows.length,
       portfolioCurve,
       accuracyCurve,
+      benchmarks,
       note: 'Simulation basee sur les signaux ACHETER verifies du moteur technique. Chaque position = 10% du capital. Resultats reels a 7 jours, gains et pertes inclus.'
     });
   } catch(e) { safeError(res, e); }
