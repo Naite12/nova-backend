@@ -797,7 +797,7 @@ app.get('/api/news', async (req, res) => {
 app.get('/api/finance', async (req, res) => {
   const { symbol } = req.query;
   try {
-    const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=1d', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const r = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/' + symbol + '?interval=1d&range=1mo', { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const d = await r.json();
     const result = d?.chart?.result?.[0];
     if (!result) return res.json({ error: 'No data' });
@@ -805,7 +805,9 @@ app.get('/api/finance', async (req, res) => {
     const price = meta.regularMarketPrice;
     const prev = meta.chartPreviousClose || meta.previousClose;
     const change = prev ? ((price - prev) / prev * 100).toFixed(2) : 0;
-    res.json({ symbol, name: meta.longName || symbol, price, change: parseFloat(change), currency: meta.currency, market: meta.exchangeName });
+    // 1-month closing prices for the sparkline
+    const closes = (result.indicators?.quote?.[0]?.close || []).filter(function(c){ return c !== null && c !== undefined; });
+    res.json({ symbol, name: meta.longName || symbol, price, change: parseFloat(change), currency: meta.currency, market: meta.exchangeName, sparkline: closes });
   } catch (e) { safeError(res, e); }
 });
 
