@@ -951,7 +951,12 @@ app.get('/api/predictions', async (req, res) => {
     const bySignalRes = await pool.query("SELECT signal, COUNT(*) FILTER (WHERE verified_7d = TRUE) AS total, COUNT(*) FILTER (WHERE verified_7d = TRUE AND correct_7d = TRUE) AS correct FROM predictions GROUP BY signal");
     const bySignal = { ACHETER:{total:0,correct:0}, VENDRE:{total:0,correct:0}, CONSERVER:{total:0,correct:0} };
     bySignalRes.rows.forEach(r => { if(bySignal[r.signal]){ bySignal[r.signal].total = parseInt(r.total); bySignal[r.signal].correct = parseInt(r.correct); } });
-    res.json({ predictions: preds, stats: { total: totalCount, totalVerified: verifiedCount, accuracy, bySignal } });
+    // Average returns on verified BUY signals (7d and 30d)
+    const retRes = await pool.query("SELECT AVG(result_7d) AS avg7 FROM predictions WHERE signal = 'ACHETER' AND verified_7d = TRUE AND result_7d IS NOT NULL");
+    const ret30Res = await pool.query("SELECT AVG(result_30d) AS avg30 FROM predictions WHERE signal = 'ACHETER' AND verified_30d = TRUE AND result_30d IS NOT NULL");
+    const avgReturn7d = retRes.rows[0].avg7 !== null ? Math.round(parseFloat(retRes.rows[0].avg7) * 100) / 100 : null;
+    const avgReturn30d = ret30Res.rows[0].avg30 !== null ? Math.round(parseFloat(ret30Res.rows[0].avg30) * 100) / 100 : null;
+    res.json({ predictions: preds, stats: { total: totalCount, totalVerified: verifiedCount, accuracy, bySignal, avgReturn7d, avgReturn30d } });
   } catch(e) { safeError(res, e); }
 });
 
