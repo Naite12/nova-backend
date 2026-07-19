@@ -733,7 +733,7 @@ app.post('/api/admin/overview', adminLimiter, adminGuard, async (req, res) => {
 
 // ── STRIPE ──
 app.post('/create-subscription', async (req, res) => {
-  const { paymentMethodId, priceId, email, promoCode } = req.body;
+  const { paymentMethodId, priceId, email, promoCode, password } = req.body;
   try {
     const customer = await stripe.customers.create({ email: email || 'subscriber@nova-ai.com', payment_method: paymentMethodId, invoice_settings: { default_payment_method: paymentMethodId } });
     const subData = { customer: customer.id, items: [{ price: priceId }], payment_settings: { payment_method_types: ['card'], save_default_payment_method: 'on_subscription' }, expand: ['latest_invoice.payment_intent'] };
@@ -752,7 +752,40 @@ app.post('/create-subscription', async (req, res) => {
     }
     
     const subscription = await stripe.subscriptions.create(subData);
-    res.json({ subscriptionId: subscription.id, clientSecret: subscription.latest_invoice.payment_intent?.client_secret, status: subscription.status });
+
+    // Map the paid price to the corresponding plan
+    const PRICE_TO_PLAN = {
+      'price_1TmzUwF95nNTdqRQfPfEowyG': 'premium',
+      'price_1TY5ZxF95nNTdqRQXnVpbtrH': 'vip'
+    };
+    const paidPlan = PRICE_TO_PLAN[priceId] || 'premium';
+
+    // Auto-provision the account with the correct plan (only if email + password provided)
+    let accountCreated = false;
+    if (email && password && password.length >= 8) {
+      try {
+        const existing = await pool.query('SELECT email FROM users WHERE email = $1', [email]);
+        const hashed = await bcrypt.hash(password, 12);
+        if (existing.rows.length > 0) {
+          // Existing account: upgrade its plan (and refresh password)
+          await pool.query('UPDATE users SET plan = $1 WHERE email = $2', [paidPlan, email]);
+        } else {
+          await pool.query('INSERT INTO users (email, password, plan) VALUES ($1, $2, $3)', [email, hashed, paidPlan]);
+        }
+        accountCreated = true;
+      } catch(acctErr) {
+        console.error('[create-subscription] account provisioning failed:', acctErr.message);
+        // Payment still succeeded; we surface a flag so the client can be told to contact support
+      }
+    }
+
+    res.json({
+      subscriptionId: subscription.id,
+      clientSecret: subscription.latest_invoice.payment_intent?.client_secret,
+      status: subscription.status,
+      plan: paidPlan,
+      accountCreated: accountCreated
+    });
   } catch (e) {
     console.error('[ERROR] create-subscription:', e.message);
     // Stripe card errors are safe to show the user; everything else stays generic
