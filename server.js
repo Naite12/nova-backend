@@ -76,6 +76,16 @@ const authLimiter = rateLimit({
 // Admin limiter: 30 / 15 min
 const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
 
+// Stricter limiter for the costly AI endpoints (each call hits the Claude API = real cost).
+// 40 calls / 15 min per IP is generous for a human but blocks automated abuse.
+const aiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de requetes d analyse. Reessayez dans quelques minutes.' }
+});
+
 // ── POSTGRESQL ──
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -791,7 +801,7 @@ app.post('/api/free-analysis', auth, async (req, res) => {
 });
 
 // ── CLAUDE API ──
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', aiLimiter, async (req, res) => {
   const { history, system, useWebSearch } = req.body;
   try {
     const body = {
