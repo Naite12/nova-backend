@@ -92,7 +92,9 @@ async function initDB() {
         plan TEXT DEFAULT 'vip',
         created_at TIMESTAMP DEFAULT NOW(),
         memory JSONB DEFAULT '{"facts":[],"conversations":0}',
-        chat_history JSONB DEFAULT '[]'
+        chat_history JSONB DEFAULT '[]',
+        free_analysis_date TEXT DEFAULT '',
+        free_analysis_symbol TEXT DEFAULT ''
       )
     `);
     await pool.query(`
@@ -259,6 +261,16 @@ async function initSessionsTable() {
   } catch(e) { console.log('initSessionsTable error:', e.message); }
 }
 initSessionsTable();
+
+// Migration: add free-tier columns to existing databases (safe if already present)
+async function migrateFreeColumns() {
+  try {
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_analysis_date TEXT DEFAULT ''");
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_analysis_symbol TEXT DEFAULT ''");
+    console.log('Free-tier columns ready');
+  } catch(e) { console.log('migrateFreeColumns error:', e.message); }
+}
+migrateFreeColumns();
 
 async function createSession(email) {
   const token = genToken();
@@ -738,6 +750,44 @@ app.post('/create-subscription', async (req, res) => {
     }
     res.status(400).json({ error: 'Le paiement n a pas pu etre traite. Veuillez reessayer.' });
   }
+});
+
+// ── FREE TIER: 1 analysis per day, enforced server-side ──
+app.post('/api/free-analysis', auth, async (req, res) => {
+  const { symbol, name, price, change, lang } = req.body;
+  if (!symbol) return res.status(400).json({ error: 'Symbole manquant' });
+  try {
+    const userRes = await pool.query('SELECT plan, free_analysis_date FROM users WHERE email = $1', [req.userEmail]);
+    const user = userRes.rows[0];
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const today = new Date().toLocaleDateString('fr-FR');
+    // Free users are limited to one analysis per calendar day
+    if (user.plan === 'free' && user.free_analysis_date === today) {
+      return res.status(429).json({ error: 'limit_reached', message: 'Limite quotidienne atteinte. Passez VIP pour des analyses illimitées.' });
+    }
+    // Generate the analysis (language-aware)
+    const langName = { fr:'francais', en:'English', es:'espanol', de:'Deutsch', it:'italiano', pt:'portugues' }[lang] || 'francais';
+    let prompt, sysPrompt;
+    if (lang === 'en') {
+      prompt = 'Professional analysis of ' + (name||symbol) + ' (' + symbol + '). Price: $' + price + ', change: ' + change + '%. 5 points: situation, strengths/weaknesses, risk /10, signal BUY/SELL/HOLD, price target. 150 words max. Plain text.';
+      sysPrompt = 'You are N.O.V.A., a financial analysis expert at Naite Industries. Reply in English. Plain text.';
+    } else {
+      prompt = 'Analyse professionnelle de ' + (name||symbol) + ' (' + symbol + '). Prix: $' + price + ', variation: ' + change + '%. 5 points: situation, forces/faiblesses, risque /10, signal ACHETER/VENDRE/CONSERVER, objectif prix. 150 mots max. Texte brut.';
+      sysPrompt = 'Tu es N.O.V.A., experte en analyse financiere de Naite Industries. Reponds en ' + langName + '. Texte brut.';
+    }
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1000, messages: [{ role: 'user', content: prompt }], system: sysPrompt })
+    });
+    const d = await r.json();
+    const text = (d.content && d.content[0] && d.content[0].text) || 'Analyse indisponible.';
+    // Record the daily usage for free users
+    if (user.plan === 'free') {
+      await pool.query('UPDATE users SET free_analysis_date = $1, free_analysis_symbol = $2 WHERE email = $3', [today, symbol, req.userEmail]);
+    }
+    res.json({ analysis: text, symbol: symbol });
+  } catch(e) { safeError(res, e); }
 });
 
 // ── CLAUDE API ──
