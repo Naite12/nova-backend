@@ -277,6 +277,7 @@ async function migrateFreeColumns() {
   try {
     await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_analysis_date TEXT DEFAULT ''");
     await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS free_analysis_symbol TEXT DEFAULT ''");
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS analysis_count INTEGER DEFAULT 0");
     console.log('Free-tier columns ready');
   } catch(e) { console.log('migrateFreeColumns error:', e.message); }
 }
@@ -762,18 +763,28 @@ app.post('/create-subscription', async (req, res) => {
   }
 });
 
-// ── FREE TIER: 1 analysis per day, enforced server-side ──
+// ── TIERED ANALYSIS: daily limit depends on plan (free=1, premium=5, vip=unlimited) ──
 app.post('/api/free-analysis', auth, async (req, res) => {
   const { symbol, name, price, change, lang } = req.body;
   if (!symbol) return res.status(400).json({ error: 'Symbole manquant' });
   try {
-    const userRes = await pool.query('SELECT plan, free_analysis_date FROM users WHERE email = $1', [req.userEmail]);
+    const userRes = await pool.query('SELECT plan, free_analysis_date, analysis_count FROM users WHERE email = $1', [req.userEmail]);
     const user = userRes.rows[0];
     if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
     const today = new Date().toLocaleDateString('fr-FR');
-    // Free users are limited to one analysis per calendar day
-    if (user.plan === 'free' && user.free_analysis_date === today) {
-      return res.status(429).json({ error: 'limit_reached', message: 'Limite quotidienne atteinte. Passez VIP pour des analyses illimitées.' });
+    // Daily quota per plan
+    const limits = { free: 1, premium: 5, vip: Infinity };
+    const limit = limits[user.plan] !== undefined ? limits[user.plan] : 1;
+    // Reset the counter if it's a new day
+    let count = (user.free_analysis_date === today) ? (user.analysis_count || 0) : 0;
+    if (count >= limit) {
+      return res.status(429).json({
+        error: 'limit_reached',
+        message: user.plan === 'free'
+          ? 'Limite quotidienne atteinte (1/jour). Passez Premium ou VIP pour plus d analyses.'
+          : 'Limite quotidienne atteinte (5/jour). Passez VIP pour des analyses illimitees.',
+        used: count, limit: limit
+      });
     }
     // Generate the analysis (language-aware)
     const langName = { fr:'francais', en:'English', es:'espanol', de:'Deutsch', it:'italiano', pt:'portugues' }[lang] || 'francais';
@@ -792,11 +803,12 @@ app.post('/api/free-analysis', auth, async (req, res) => {
     });
     const d = await r.json();
     const text = (d.content && d.content[0] && d.content[0].text) || 'Analyse indisponible.';
-    // Record the daily usage for free users
-    if (user.plan === 'free') {
-      await pool.query('UPDATE users SET free_analysis_date = $1, free_analysis_symbol = $2 WHERE email = $3', [today, symbol, req.userEmail]);
+    // Increment the daily counter (skip for unlimited VIP to avoid useless writes)
+    if (user.plan !== 'vip') {
+      count++;
+      await pool.query('UPDATE users SET free_analysis_date = $1, analysis_count = $2, free_analysis_symbol = $3 WHERE email = $4', [today, count, symbol, req.userEmail]);
     }
-    res.json({ analysis: text, symbol: symbol });
+    res.json({ analysis: text, symbol: symbol, used: count, limit: (limit === Infinity ? null : limit) });
   } catch(e) { safeError(res, e); }
 });
 
