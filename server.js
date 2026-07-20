@@ -283,6 +283,24 @@ async function migrateFreeColumns() {
 }
 migrateFreeColumns();
 
+// Daily performance history: one snapshot per day (N.O.V.A. return vs market benchmarks)
+async function initPerfHistoryTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS perf_history (
+        date_str TEXT PRIMARY KEY,
+        nova_return REAL,
+        spy_return REAL,
+        btc_return REAL,
+        signals_count INTEGER,
+        recorded_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('Perf history table ready');
+  } catch(e) { console.log('initPerfHistoryTable error:', e.message); }
+}
+initPerfHistoryTable();
+
 async function createSession(email) {
   const token = genToken();
   try {
@@ -1019,6 +1037,22 @@ app.get('/api/performance', async (req, res) => {
       benchmarks.btc = await benchReturn('BTC-USD');
     }
 
+    // Record one snapshot per day (upsert: only the first call of the day writes, later calls update)
+    try {
+      const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      await pool.query(
+        `INSERT INTO perf_history (date_str, nova_return, spy_return, btc_return, signals_count)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (date_str) DO UPDATE SET
+           nova_return = EXCLUDED.nova_return,
+           spy_return = EXCLUDED.spy_return,
+           btc_return = EXCLUDED.btc_return,
+           signals_count = EXCLUDED.signals_count,
+           recorded_at = NOW()`,
+        [todayStr, totalReturn, benchmarks.spy, benchmarks.btc, rows.length]
+      );
+    } catch(histErr) { console.log('perf_history record error:', histErr.message); }
+
     res.json({
       startCapital,
       finalValue,
@@ -1029,6 +1063,16 @@ app.get('/api/performance', async (req, res) => {
       benchmarks,
       note: 'Simulation basee sur les signaux ACHETER verifies du moteur technique. Chaque position = 10% du capital. Resultats reels a 7 jours, gains et pertes inclus.'
     });
+  } catch(e) { safeError(res, e); }
+});
+
+// ── PERFORMANCE HISTORY: daily snapshots over time ──
+app.get('/api/perf-history', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT date_str, nova_return, spy_return, btc_return, signals_count FROM perf_history ORDER BY date_str ASC'
+    );
+    res.json({ history: result.rows });
   } catch(e) { safeError(res, e); }
 });
 
