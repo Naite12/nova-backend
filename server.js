@@ -1592,11 +1592,9 @@ const TRADING_UNIVERSE = [
   'AAPL','MSFT','NVDA','GOOGL','META','AMZN','TSLA','AMD','NFLX','COIN','JPM','V','MA','DIS','BA','UBER','PYPL'
 ];
 // Removed from active universe (Jul 2026): XLK, SOXX, ARKK, QQQ — volatile tech/growth ETFs
-// that consistently underperformed on BUY signals (avg -2 to -3% over 7d). Candidates for
-// re-integration once the stricter overbought filter below is validated over time.
-
-// Assets flagged as high-volatility: BUY signals require stricter conditions (see runAutoPredictions).
-const VOLATILE_ASSETS = ['BTC-USD','ETH-USD','SOL-USD','BNB-USD','XRP-USD','ADA-USD','AVAX-USD','DOT-USD','LINK-USD','MATIC-USD','TSLA','COIN','NVDA','AMD','ARKK','SOXX','XLK'];
+// that consistently underperformed on BUY signals (avg -2 to -3% over 7d), while individual
+// stocks and broad indices performed well. Data confirmed the issue is these sector ETFs
+// specifically, not volatility in general (cryptos/TSLA/NVDA averaged +2.53% on BUY signals).
 const RISK_PROFILES = {
   conservative: { positionSize: 0.05, stopLoss: 0.05, takeProfit: 0.08, minConfidence: 80, maxPositions: 5 },
   balanced: { positionSize: 0.10, stopLoss: 0.08, takeProfit: 0.15, minConfidence: 70, maxPositions: 8 },
@@ -1713,20 +1711,6 @@ function novaTechnicalSignal(symbol, closes, price) {
   if (net >= 3) { signal = 'ACHETER'; confidence = Math.min(90, 60 + net * 5); }
   else if (net <= -3) { signal = 'VENDRE'; confidence = Math.min(90, 60 + Math.abs(net) * 5); }
   else { signal = 'CONSERVER'; confidence = 55 + Math.floor(Math.abs(net) * 3); }
-
-  // ── VOLATILITY GUARD ──
-  // On high-volatility assets, buying into strength often means buying the top just before
-  // a pullback (data showed avg -2 to -3% on volatile tech ETFs/cryptos). So for these assets
-  // we downgrade an ACHETER to CONSERVER when the setup shows overbought / overheated conditions.
-  if (signal === 'ACHETER' && VOLATILE_ASSETS.indexOf(symbol) !== -1) {
-    const overbought = (rsiVal !== null && rsiVal > 62);   // already stretched
-    const overheated = (momentum5 > 6);                     // ran up too fast (mean-reversion risk)
-    if (overbought || overheated) {
-      signal = 'CONSERVER';
-      confidence = 55;
-      reasons.push('prudence: actif volatil en conditions de surchauffe, achat differe');
-    }
-  }
 
   let reasoning = reasons.length > 0
     ? 'Analyse technique: ' + reasons.slice(0, 3).join(', ') + '.'
