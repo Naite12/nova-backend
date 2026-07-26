@@ -1596,9 +1596,9 @@ const TRADING_UNIVERSE = [
 // stocks and broad indices performed well. Data confirmed the issue is these sector ETFs
 // specifically, not volatility in general (cryptos/TSLA/NVDA averaged +2.53% on BUY signals).
 const RISK_PROFILES = {
-  conservative: { positionSize: 0.05, stopLoss: 0.05, takeProfit: 0.08, minConfidence: 80, maxPositions: 5 },
-  balanced: { positionSize: 0.10, stopLoss: 0.08, takeProfit: 0.15, minConfidence: 70, maxPositions: 8 },
-  aggressive: { positionSize: 0.15, stopLoss: 0.12, takeProfit: 0.25, minConfidence: 60, maxPositions: 12 }
+  conservative: { positionSize: 0.05, stopLoss: 0.05, takeProfit: 0.08, minConfidence: 78, maxPositions: 5 },
+  balanced: { positionSize: 0.10, stopLoss: 0.08, takeProfit: 0.15, minConfidence: 68, maxPositions: 8 },
+  aggressive: { positionSize: 0.15, stopLoss: 0.12, takeProfit: 0.25, minConfidence: 58, maxPositions: 12 }
 };
 
 async function getPriceForSymbol(symbol) {
