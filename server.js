@@ -1079,7 +1079,8 @@ app.get('/api/perf-history', async (req, res) => {
 app.get('/api/predictions', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
-    const result = await pool.query('SELECT * FROM predictions ORDER BY date DESC LIMIT $1', [limit]);
+    const offset = parseInt(req.query.offset) || 0;
+    const result = await pool.query('SELECT * FROM predictions ORDER BY date DESC LIMIT $1 OFFSET $2', [limit, offset]);
     const preds = result.rows.map(p => ({
       id: p.id, symbol: p.symbol, name: p.name, signal: p.signal,
       price: parseFloat(p.price), confidence: p.confidence, reasoning: p.reasoning,
@@ -1993,8 +1994,9 @@ app.post('/api/analyses/save', async (req, res) => {
 
 app.get('/api/analyses', async (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
+  const offset = parseInt(req.query.offset) || 0;
   try {
-    const result = await pool.query('SELECT * FROM analyses ORDER BY date DESC LIMIT $1', [limit]);
+    const result = await pool.query('SELECT * FROM analyses ORDER BY date DESC LIMIT $1 OFFSET $2', [limit, offset]);
     // Global stats over the entire table (not just the limited page)
     const totalRes = await pool.query('SELECT COUNT(*) AS total, COUNT(DISTINCT symbol) AS unique_symbols FROM analyses');
     const today = new Date().toLocaleDateString('fr-FR');
