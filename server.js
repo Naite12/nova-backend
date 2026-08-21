@@ -1608,13 +1608,17 @@ app.delete('/api/portfolio', auth, async (req, res) => {
 // ── AUTONOMOUS TRADER ──
 const TRADING_UNIVERSE = [
   'BTC-USD','ETH-USD','SOL-USD','BNB-USD','XRP-USD','ADA-USD','AVAX-USD','DOT-USD','LINK-USD','MATIC-USD',
-  'SPY','DIA','IWM','VTI','VOO','GLD','SLV','XLF','XLE','XLV',
+  'SPY','DIA','IWM','VTI','VOO','XLF','XLE','XLV',
   'AAPL','MSFT','NVDA','GOOGL','META','AMZN','TSLA','AMD','NFLX','COIN','JPM','V','MA','DIS','BA','UBER','PYPL'
 ];
 // Removed from active universe (Jul 2026): XLK, SOXX, ARKK, QQQ — volatile tech/growth ETFs
 // that consistently underperformed on BUY signals (avg -2 to -3% over 7d), while individual
 // stocks and broad indices performed well. Data confirmed the issue is these sector ETFs
 // specifically, not volatility in general (cryptos/TSLA/NVDA averaged +2.53% on BUY signals).
+// Removed (Aug 2026): GLD, SLV — precious metals. The engine never issued BUY signals on them
+// and its SELL signals failed almost entirely (1/23 correct): gold/silver are safe-haven assets
+// that follow rates/inflation/fear, not the technical momentum the engine reads. Removing them
+// lifted SELL accuracy from 44% to 50%.
 const RISK_PROFILES = {
   conservative: { positionSize: 0.05, stopLoss: 0.05, takeProfit: 0.08, minConfidence: 78, maxPositions: 5 },
   balanced: { positionSize: 0.10, stopLoss: 0.08, takeProfit: 0.15, minConfidence: 68, maxPositions: 8 },
