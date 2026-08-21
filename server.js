@@ -815,6 +815,25 @@ app.post('/create-subscription', async (req, res) => {
 });
 
 // ── TIERED ANALYSIS: daily limit depends on plan (free=1, premium=5, vip=unlimited) ──
+// Quota status: how many analyses used today vs the plan limit
+app.get('/api/free-status', auth, async (req, res) => {
+  try {
+    const userRes = await pool.query('SELECT plan, free_analysis_date, analysis_count FROM users WHERE email = $1', [req.userEmail]);
+    const user = userRes.rows[0];
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const today = new Date().toLocaleDateString('fr-FR');
+    const limits = { free: 1, premium: 5, vip: Infinity };
+    const limit = limits[user.plan] !== undefined ? limits[user.plan] : 1;
+    const used = (user.free_analysis_date === today) ? (user.analysis_count || 0) : 0;
+    res.json({
+      plan: user.plan,
+      used: used,
+      limit: (limit === Infinity ? null : limit),
+      remaining: (limit === Infinity ? null : Math.max(0, limit - used))
+    });
+  } catch(e) { safeError(res, e); }
+});
+
 app.post('/api/free-analysis', auth, async (req, res) => {
   const { symbol, name, price, change, lang } = req.body;
   if (!symbol) return res.status(400).json({ error: 'Symbole manquant' });
