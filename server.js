@@ -566,6 +566,44 @@ app.post('/api/admin/users', adminLimiter, adminGuard, async (req, res) => {
   } catch(e) { safeError(res, e); }
 });
 
+// Change a specific user's plan (admin only). Logs the change as a security event.
+app.post('/api/admin/update-plan', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const email = (req.body && req.body.email || '').trim().toLowerCase();
+    const newPlan = (req.body && req.body.plan || '').trim().toLowerCase();
+    const validPlans = ['free', 'premium', 'vip'];
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+    if (!validPlans.includes(newPlan)) return res.status(400).json({ error: 'Plan invalide (free, premium ou vip)' });
+    const cur = await pool.query('SELECT plan FROM users WHERE email = $1', [email]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const oldPlan = cur.rows[0].plan;
+    await pool.query('UPDATE users SET plan = $1 WHERE email = $2', [newPlan, email]);
+    logSecurityEvent('admin_plan_change', 'warning', getIP(req), 'Plan change par admin: ' + email + ' ' + oldPlan + ' -> ' + newPlan, { email: email, oldPlan: oldPlan, newPlan: newPlan });
+    res.json({ success: true, email: email, oldPlan: oldPlan, newPlan: newPlan });
+  } catch(e) { safeError(res, e); }
+});
+
+// Detailed view of one user (admin only)
+app.post('/api/admin/user-detail', adminLimiter, adminGuard, async (req, res) => {
+  try {
+    const email = (req.body && req.body.email || '').trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+    const result = await pool.query('SELECT email, plan, created_at, free_analysis_date, analysis_count, chat_history FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const u = result.rows[0];
+    const hist = u.chat_history || [];
+    res.json({
+      email: u.email,
+      plan: u.plan,
+      createdAt: u.created_at,
+      analysisCount: u.analysis_count || 0,
+      lastAnalysisDate: u.free_analysis_date || null,
+      messageCount: hist.length,
+      lastActivity: hist.length > 0 ? hist[hist.length - 1].time : null
+    });
+  } catch(e) { safeError(res, e); }
+});
+
 app.post('/api/admin/revenue', adminLimiter, adminGuard, async (req, res) => {
   try {
     const result = await pool.query(`
